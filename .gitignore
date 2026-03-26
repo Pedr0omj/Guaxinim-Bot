@@ -1,0 +1,13 @@
+# Credenciais e Variáveis de Ambiente locais
+.env
+.env.*
+
+# Caches de compilação do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Diretórios de Ambientes Virtuais (boas práticas para Python)
+venv/
+env/
+.venv/
