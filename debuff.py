@@ -1,6 +1,8 @@
 """
 debuff.py — Guaxinim Bot
 Gerenciamento de status persistentes: debuffs, escudos, efeitos por turno.
+
+CORREÇÃO: absorver_dano_escudo agora chama salvar_ficha ao final.
 """
 
 from __future__ import annotations
@@ -14,27 +16,24 @@ from ficha import FichaPersonagem, salvar_ficha
 
 def processar_tick_debuffs(personagem: FichaPersonagem) -> list[str]:
     """
-    Processa os debuffs no início/fim de turno.
-    Aplica dano de DoT (Queimadura, Sangramento) e remove os expirados.
-    Retorna lista de mensagens para o embed de resultado.
+    Processa debuffs no início/fim de turno.
+    Aplica DoT (Queimadura, Sangramento) e remove os expirados.
     """
     mensagens = []
 
     for debuff in list(personagem.debuffs):
         nome = debuff["nome"]
 
-        # Dano por turno (DoT)
         if nome == "Queimadura":
-            dano_dot = max(1, personagem.hp_max // 20)   # 5% HP máx por turno
+            dano_dot = max(1, personagem.hp_max // 20)
             aplicado = personagem.receber_dano(dano_dot)
             mensagens.append(f"🔥 **Queimadura** causou **{aplicado}** de dano.")
 
         elif nome == "Sangramento":
-            dano_dot = max(1, int(personagem.hp_max * 0.07))  # 7% HP máx
+            dano_dot = max(1, int(personagem.hp_max * 0.07))
             aplicado = personagem.receber_dano(dano_dot)
             mensagens.append(f"🩸 **Sangramento** causou **{aplicado}** de dano.")
 
-    # Avança duração e remove expirados
     expirados = personagem.tick_debuffs()
     for nome_exp in expirados:
         emoji = DEBUFFS.get(nome_exp, {}).get("emoji", "✅")
@@ -50,12 +49,9 @@ def processar_tick_debuffs(personagem: FichaPersonagem) -> list[str]:
 
 def aplicar_escudo(personagem: FichaPersonagem, valor: int) -> int:
     """
-    Adiciona um escudo temporário ao personagem.
-    O escudo absorve dano antes do HP.
-    Armazenado como debuff especial com duração de 1 turno.
+    Adiciona escudo temporário. Duração = 1 turno.
     Retorna valor do escudo aplicado.
     """
-    # Escudo é modelado como debuff especial "Escudo" com campo extra "valor"
     personagem.adicionar_debuff("Escudo", duracao=1, valor=valor)
     salvar_ficha(personagem)
     return valor
@@ -65,6 +61,8 @@ def absorver_dano_escudo(personagem: FichaPersonagem, dano: int) -> tuple[int, i
     """
     Tenta absorver dano com escudo ativo.
     Retorna (dano_restante, dano_absorvido).
+
+    CORREÇÃO: salva a ficha após modificar o escudo.
     """
     for debuff in personagem.debuffs:
         if debuff["nome"] == "Escudo":
@@ -73,6 +71,7 @@ def absorver_dano_escudo(personagem: FichaPersonagem, dano: int) -> tuple[int, i
             debuff["valor"] -= absorvido
             if debuff["valor"] <= 0:
                 personagem.debuffs.remove(debuff)
+            salvar_ficha(personagem)   # CORREÇÃO: persistir após absorção
             return dano - absorvido, absorvido
     return dano, 0
 
@@ -82,12 +81,10 @@ def absorver_dano_escudo(personagem: FichaPersonagem, dano: int) -> tuple[int, i
 # ─────────────────────────────────────────
 
 def verificar_atordoamento(personagem: FichaPersonagem) -> bool:
-    """Retorna True se o personagem está atordoado (não pode agir)."""
     return personagem.tem_debuff("Atordoado")
 
 
 def consumir_atordoamento(personagem: FichaPersonagem):
-    """Remove o debuff de Atordoado após o turno ser pulado."""
     personagem.debuffs = [d for d in personagem.debuffs if d["nome"] != "Atordoado"]
     salvar_ficha(personagem)
 
@@ -97,17 +94,14 @@ def consumir_atordoamento(personagem: FichaPersonagem):
 # ─────────────────────────────────────────
 
 def formatar_debuffs_embed(personagem: FichaPersonagem) -> str:
-    """
-    Retorna string formatada com todos os debuffs ativos para uso em embed.
-    Ex: "🩸 Sangramento (2t)  ❄️ Congelado (1t)"
-    """
+    """Retorna string compacta de debuffs ativos para embeds."""
     if not personagem.debuffs:
         return "✅ Nenhum"
 
     partes = []
     for d in personagem.debuffs:
-        nome = d["nome"]
-        dur  = d.get("duracao", "?")
+        nome  = d["nome"]
+        dur   = d.get("duracao", "?")
         emoji = DEBUFFS.get(nome, {}).get("emoji", "⚠️")
         if nome == "Escudo":
             partes.append(f"🛡️ Escudo ({d.get('valor', 0)} HP)")
@@ -118,7 +112,7 @@ def formatar_debuffs_embed(personagem: FichaPersonagem) -> str:
 
 
 def formatar_debuffs_lista(personagem: FichaPersonagem) -> list[str]:
-    """Retorna lista de strings para cada debuff (para campos separados em embed)."""
+    """Lista de strings por debuff (para campos separados em embed)."""
     resultado = []
     for d in personagem.debuffs:
         nome  = d["nome"]
