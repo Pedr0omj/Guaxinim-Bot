@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-from config import STATS_VALIDOS
+from config import VALID_STATS
 from elementos import normalizar_elemento
 
 FICHAS_PATH = "fichas.json"
@@ -75,9 +75,14 @@ class FichaPersonagem:
 
     def recalcular_hp_max(self):
         novo_max = self._calcular_hp_max()
-        if self.hp_max > 0:
+        # MELHORADO: Eu apenas chekava se hp_max > 0, mas isso era frágil (edge case raro).
+        # Agora garanto que nunca divido por zero e preservo proporção de HP com mais segurança.
+        if self.hp_max > 0 and novo_max > 0:
             proporcao = self.hp_atual / self.hp_max
-            self.hp_atual = int(novo_max * proporcao)
+            self.hp_atual = max(1, int(novo_max * proporcao))
+        else:
+            # Edge case: se hp_max era 0 ou novo_max é 0, redefine HP para máximo
+            self.hp_atual = novo_max
         self.hp_max = novo_max
 
     def receber_dano(self, dano: int) -> int:
@@ -186,14 +191,23 @@ def _salvar_todas(dados: dict[str, dict]):
         json.dump(dados, f, ensure_ascii=False, indent=2)
 
 
-def salvar_ficha(ficha: FichaPersonagem):
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_salvar_ficha_async(ficha))
-    except RuntimeError:
-        dados = _carregar_todas()
-        dados[ficha.nome.lower()] = ficha.to_dict()
-        _salvar_todas(dados)
+def salvar_ficha(ficha: FichaPersonagem) -> None:
+    """
+    Salva a ficha de forma segura contra race conditions.
+    Sempre usa salvamento síncrono com lock para garantir dados salvos antes de continuar.
+    
+    CORREÇÃO: Eu estava criando uma task assíncrona sem aguardar, o que causava
+    possível perda de dados em shutdown. Agora sempre executa salvamento bloqueante
+    para garantir atomicidade. Para contextos assíncronos, use salvar_ficha_async().
+    """
+    _salvar_ficha_sync(ficha)
+
+
+def _salvar_ficha_sync(ficha: FichaPersonagem):
+    """Synchronous save (for non-async contexts)."""
+    dados = _carregar_todas()
+    dados[ficha.nome.lower()] = ficha.to_dict()
+    _salvar_todas(dados)
 
 
 async def _salvar_ficha_async(ficha: FichaPersonagem):
@@ -201,6 +215,17 @@ async def _salvar_ficha_async(ficha: FichaPersonagem):
         dados = _carregar_todas()
         dados[ficha.nome.lower()] = ficha.to_dict()
         _salvar_todas(dados)
+
+
+async def salvar_ficha_async(ficha: FichaPersonagem) -> None:
+    """
+    Versão assíncrona segura de salvar_ficha para contextos async.
+    Use esta função quando estiver em um handler assíncrono para não bloquear a event loop.
+    
+    ADICIONADO: Novo método para permitir salvamento não-bloqueante em handlers assíncronos.
+    Esta função aguarda o lock antes de salvar, garantindo atomicidade sem bloquear.
+    """
+    await _salvar_ficha_async(ficha)
 
 
 def carregar_ficha_por_nome(nome: str) -> FichaPersonagem | None:
@@ -296,7 +321,7 @@ def criar_ficha_interativa(
         elemento_secundario=elem_sec,
         STR=str_, RES=res, AGI=agi, SEN=sen, VIT=vit, INT=int_,
         rebirths=rebirths,
-        gnose_max=100, # Modificado para forçar 100 de Gnose base
+        gnose_max=gnose_max,  # Use parameter, not hardcoded
         zona=zona,
         is_secundario=is_sec,
     )

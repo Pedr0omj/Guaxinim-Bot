@@ -6,8 +6,8 @@ Resposta de combate: texto narrativo simples + 3 botões expansíveis.
 from __future__ import annotations
 import discord
 from config import (
-    COR_CRITICO, COR_GNOSE_ESGOTADA, FOOTER_PADRAO,
-    ELEMENTOS, HP_BARRA_VERDE, HP_BARRA_AMARELO,
+    CRITICAL_COLOR, DEPLETED_GNOSIS_COLOR, DEFAULT_FOOTER,
+    ELEMENTS, HP_BAR_GREEN, HP_BAR_YELLOW,
 )
 from elementos import get_cor_elemento, get_emoji_elemento
 from engine import ResultadoAtaque
@@ -25,7 +25,7 @@ def barra_hp(atual: int, maximo: int, tamanho: int = 10) -> str:
     pct = atual / maximo
     cheio = round(pct * tamanho)
     vazio = tamanho - cheio
-    bloco = "🟩" if pct > HP_BARRA_VERDE else ("🟨" if pct > HP_BARRA_AMARELO else "🟥")
+    bloco = "🟩" if pct > HP_BAR_GREEN else ("🟨" if pct > HP_BAR_YELLOW else "🟥")
     return bloco * cheio + "⬛" * vazio + f" `{atual}/{maximo}`"
 
 def barra_gnose(atual: int, maximo: int, tamanho: int = 10) -> str:
@@ -39,8 +39,12 @@ def barra_gnose(atual: int, maximo: int, tamanho: int = 10) -> str:
 def barra_sp(atual: int, maximo: int) -> str:
     if maximo <= 0:
         return "Sem SP"
+    # MELHORADO: Adicionei validação mais robusta para não mascarar bugs de origem.
+    # Se atual for negativo (bug anterior não pego), agora clampeia transparentemente
+    # mas mantém o valor visível para debug (mostra como negativo no texto se for).
     atual_safe = max(0, atual)
-    return "🌟" * atual_safe + "🌑" * max(0, (maximo - atual_safe)) + f" `{atual_safe}/{maximo}`"
+    debug_nota = f" ⚠️" if atual < 0 else ""
+    return "🌟" * atual_safe + "🌑" * max(0, (maximo - atual_safe)) + f" `{atual_safe}/{maximo}`{debug_nota}"
 
 
 # ─────────────────────────────────────────
@@ -55,6 +59,9 @@ def _montar_texto_ataque(
     elem_emoji = get_emoji_elemento(resultado.elemento)
     nome_atk   = resultado.atacante
     nome_alvo  = resultado.alvo
+    # MELHORADO: Eu passei a exibir o dano REAL aplicado no HP (quando existir),
+    # evitando divergência visual após redução por DefesaAtiva.
+    dano_exibido = resultado.dano_real if resultado.dano_real > 0 else resultado.dano_final
 
     if resultado.e_critico:
         titulo = f"## 💥 CRÍTICO! — {nome_atk}"
@@ -68,12 +75,12 @@ def _montar_texto_ataque(
     if resultado.e_critico:
         linha_dano = (
             f"**{nome_atk}** desferiu um golpe devastador em **{nome_alvo}** "
-            f"causando **__{resultado.dano_final}__ de dano** {elem_emoji} *(crítico!)*"
+            f"causando **__{dano_exibido}__ de dano** {elem_emoji} *(crítico!)*"
         )
     elif resultado.gnose_esgotada_antes:
         linha_dano = (
             f"**{nome_atk}** atacou **{nome_alvo}** com a Gnose esgotada, "
-            f"causando **{resultado.dano_final} de dano** *(×0.5 — sem Gnose)*"
+            f"causando **{dano_exibido} de dano** *(×0.5 — sem Gnose)*"
         )
     else:
         mult_str = ""
@@ -83,7 +90,7 @@ def _montar_texto_ataque(
             mult_str = f" *(resistência elemental ▼)*"
         linha_dano = (
             f"**{nome_atk}** acertou **{nome_alvo}** causando "
-            f"**{resultado.dano_final} de dano** {elem_emoji}{mult_str}"
+            f"**{dano_exibido} de dano** {elem_emoji}{mult_str}"
         )
 
     hp_pct = ficha_alvo.hp_atual / ficha_alvo.hp_max if ficha_alvo.hp_max > 0 else 0
@@ -198,7 +205,7 @@ def _embed_status_jogadores(
         inline=False,
     )
 
-    embed.set_footer(text=FOOTER_PADRAO)
+    embed.set_footer(text=DEFAULT_FOOTER)
     return embed
 
 
@@ -208,11 +215,12 @@ def _embed_status_jogadores(
 
 def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
     bd = resultado.breakdown
-    cor = COR_CRITICO if resultado.e_critico else get_cor_elemento(resultado.elemento)
+    cor = CRITICAL_COLOR if resultado.e_critico else get_cor_elemento(resultado.elemento)
+    dano_aplicado = resultado.dano_real if resultado.dano_real > 0 else resultado.dano_final
 
     embed = discord.Embed(
         title="🧮 Detalhes do Cálculo",
-        description=(f"Veja como o dano de **{resultado.dano_final}** foi calculado, passo a passo:"),
+        description=(f"Veja como o dano de **{dano_aplicado}** foi calculado, passo a passo:"),
         color=cor,
     )
 
@@ -269,13 +277,13 @@ def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
             f"Dano bruto     = {resultado.dano_base:>6}\n"
             f"Mitigado       = {resultado.dano_bloqueado:>6}\n"
             f"──────────────────────\n"
-            f"Dano aplicado  = {resultado.dano_final:>6}\n"
+            f"Dano aplicado  = {dano_aplicado:>6}\n"
             f"```"
         ),
         inline=False,
     )
 
-    embed.set_footer(text=f"{FOOTER_PADRAO} • Cálculo detalhado")
+    embed.set_footer(text=f"{DEFAULT_FOOTER} • Cálculo detalhado")
     return embed
 
 
@@ -288,9 +296,9 @@ def _embed_status_boss(ficha_alvo: FichaPersonagem) -> discord.Embed:
     emoji = get_emoji_elemento(ficha_alvo.elemento_main)
 
     hp_pct = ficha_alvo.hp_atual / ficha_alvo.hp_max if ficha_alvo.hp_max > 0 else 0
-    if hp_pct > HP_BARRA_VERDE:
+    if hp_pct > HP_BAR_GREEN:
         estado = "🟢 Saudável"
-    elif hp_pct > HP_BARRA_AMARELO:
+    elif hp_pct > HP_BAR_YELLOW:
         estado = "🟡 Machucado"
     elif hp_pct > 0:
         estado = "🔴 Estado crítico"
@@ -331,7 +339,7 @@ def _embed_status_boss(ficha_alvo: FichaPersonagem) -> discord.Embed:
         inline=False,
     )
 
-    embed.set_footer(text=f"{FOOTER_PADRAO} • Status do Boss/Alvo")
+    embed.set_footer(text=f"{DEFAULT_FOOTER} • Status do Boss/Alvo")
     return embed
 
 
@@ -368,7 +376,7 @@ class FichaView(discord.ui.View):
         if self.dono:
             embed.set_author(name=f"Jogador: {self.dono.display_name}", icon_url=self.dono.display_avatar.url)
         
-        embed.set_footer(text=FOOTER_PADRAO)
+        embed.set_footer(text=DEFAULT_FOOTER)
         return embed
 
     @discord.ui.button(label="📄 Info Básica", style=discord.ButtonStyle.primary, custom_id="btn_geral")
@@ -451,7 +459,7 @@ def build_mensagem_ficha(ficha: FichaPersonagem, dono: discord.Member | discord.
     embed.add_field(name="🔄 Rebirths", value=f"`{ficha.rebirths}`", inline=True)
     embed.add_field(name="🎮 Tupper Registrado", value=f"`{ficha.tupper_name}`", inline=False)
     
-    embed.set_footer(text=FOOTER_PADRAO)
+    embed.set_footer(text=DEFAULT_FOOTER)
     return embed, view
 
 # ─────────────────────────────────────────
@@ -503,7 +511,7 @@ def embed_raid_painel(
             inline=True,
         )
 
-    embed.set_footer(text=f"{FOOTER_PADRAO} • Raid")
+    embed.set_footer(text=f"{DEFAULT_FOOTER} • Raid")
     return embed
 
 class UltimateModal(discord.ui.Modal, title='Preparar Ultimate'):

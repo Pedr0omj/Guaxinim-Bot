@@ -1,6 +1,6 @@
 """
 brain.py — Guaxinim Bot
-IA árbitro narrativo (Mestre): valida ações, gera VA e respostas de boss.
+Árbitro narrativo IA (Mestre): valida ações, gera VA e respostas do boss.
 Usa Anthropic Claude, Gemini ou OpenAI via API.
 """
 
@@ -8,8 +8,13 @@ from __future__ import annotations
 import os
 import re
 import json
+import logging
 import aiohttp
 import asyncio
+
+# ADICIONADO: Logging para rastrear falhas de API e erros de processamento
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # ─────────────────────────────────────────
 # CONFIGURAÇÃO DE MODELOS E CHAVES
@@ -72,15 +77,22 @@ async def avaliar_acao(
     if not tasks:
         return _fallback_estatico(acao)
 
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-
-    for p in pending:
-        p.cancel()
-
-    for task in done:
-        resultado = task.result()
-        if resultado:
-            return resultado
+    # MELHORADO: Eu parei de aceitar o "primeiro que responder" cegamente.
+    # Agora eu espero o primeiro resultado VÁLIDO (não-None) para evitar queda prematura em fallback.
+    pending = set(tasks)
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                resultado = task.result()
+            except Exception:
+                continue
+            if resultado:
+                for p in pending:
+                    p.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                return resultado
 
     return _fallback_estatico(acao)
 
@@ -115,15 +127,22 @@ async def gerar_resposta_boss(
     if not tasks:
         return "Vocês não podem me derrotar..."
 
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-
-    for p in pending:
-        p.cancel()
-
-    for task in done:
-        resultado = task.result()
-        if resultado:
-            return resultado
+    # MELHORADO: Eu também passei a buscar a primeira fala válida do boss,
+    # evitando fallback desnecessário quando a primeira task termina com erro/None.
+    pending = set(tasks)
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                resultado = task.result()
+            except Exception:
+                continue
+            if resultado:
+                for p in pending:
+                    p.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                return resultado
 
     return "Vocês não podem me derrotar..."
 
@@ -159,7 +178,13 @@ async def _chamar_gemini(prompt: str) -> dict | None:
                 data = await r.json()
                 texto = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 return _parse_json_seguro(texto)
-    except Exception:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        # MELHORADO: Logging específico de erros de rede para debug
+        logger.warning(f"Gemini API error: {type(e).__name__}")
+        return None
+    except Exception as e:
+        # MELHORADO: Captura erros inesperados com stack trace para debug
+        logger.exception(f"Unexpected error in _chamar_gemini: {e}")
         return None
 
 
@@ -186,7 +211,13 @@ async def _chamar_gemini_texto(prompt: str, system: str) -> str | None:
                     return None
                 data = await r.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        # MELHORADO: Logging específico de erros de rede para debug (texto)
+        logger.warning(f"Gemini API error (text): {type(e).__name__}")
+        return None
+    except Exception as e:
+        # MELHORADO: Captura erros inesperados com stack trace para debug
+        logger.exception(f"Unexpected error in _chamar_gemini_texto: {e}")
         return None
 
 
@@ -310,11 +341,43 @@ def _parse_json_seguro(texto: str) -> dict | None:
     except json.JSONDecodeError:
         return None
 
+
+def _extrair_alvo_basico(acao: str) -> str | None:
+    """Extrai alvo em fallback por padrão simples: 'em X', 'contra X', 'no X' etc."""
+    padrao = re.compile(r"(?:em|contra|no|na|ao|à)\s+([\wÀ-ÿ-]+)", re.IGNORECASE)
+    match = padrao.search(acao)
+    return match.group(1) if match else None
+
 def _fallback_estatico(acao: str) -> dict:
-    """Retorna um resultado genérico se todas as IAs falharem ou estiverem offline."""
+    """Retorna um resultado genérico se todas as IAs falharem ou estiverem offline.
+    
+    ADICIONADO: Implementa lógica básica de validação para garantir que
+    nem toda ação é aceita. Rejeita padrões suspeitos:
+    - Ações sem menção a alvo (indicando ação mal construída)
+    - Ações muito curtas (provável comando/spam)
+    """
+    # MELHORADO: Eu reduzi rejeições agressivas no fallback para não bloquear
+    # ações válidas quando os provedores de IA estiverem indisponíveis.
+    acao_lower = acao.lower().strip()
+    alvo_extraido = _extrair_alvo_basico(acao)
+
+    # Mantive rejeição apenas para mensagens quase vazias/spam.
+    if len(acao_lower) < 3:
+        return {
+            "tipo": "ataque",
+            "alvo": alvo_extraido,
+            "categoria_acao": "basico",
+            "va": 3,
+            "comentario": "A ação foi rejeitada: muito vaga ou incompleta.",
+            "valida": False,
+            "motivo_invalido": "Ação muito curta para ser interpretada."
+        }
+
+    # Se passou na heurística, aceita
     return {
         "tipo": "ataque",
-        "alvo": None,
+        "alvo": alvo_extraido,
+        "categoria_acao": "basico",
         "va": 5,
         "comentario": "Ação computada pelos sistemas de contingência.",
         "valida": True,

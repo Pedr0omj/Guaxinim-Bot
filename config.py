@@ -12,146 +12,154 @@ load_dotenv()
 # TOKEN E IDs
 # ─────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-GUILD_ID   = int(os.getenv("GUILD_ID", 0))  # servidor de teste (sync rápido)
+GUILD_ID = int(os.getenv("GUILD_ID", 0))  # servidor de teste (sincronização rápida)
 
 # ─────────────────────────────────────────
 # ELEMENTOS — cores em hex para embeds
 # ─────────────────────────────────────────
-ELEMENTOS: dict[str, dict] = {
+ELEMENTS: dict[str, dict] = {
     "Imaginario": {
-        "cor":    0x9B59B6,   # roxo/violeta
-        "emoji":  "🌀",
-        "alias":  ["imaginario", "imaginário", "imag"],
+        "color": 0x9B59B6,  # roxo/violeta
+        "emoji": "🌀",
+        "aliases": ["imaginario", "imaginário", "imag"],
     },
     "Quantum": {
-        "cor":    0xE91E8C,   # rosa/magenta
-        "emoji":  "🔮",
-        "alias":  ["quantum", "quant"],
+        "color": 0xE91E8C,  # rosa/magenta
+        "emoji": "🔮",
+        "aliases": ["quantum", "quant"],
     },
     "Raio": {
-        "cor":    0xF1C40F,   # amarelo elétrico
-        "emoji":  "⚡",
-        "alias":  ["raio", "lightning"],
+        "color": 0xF1C40F,  # amarelo elétrico
+        "emoji": "⚡",
+        "aliases": ["raio", "lightning"],
     },
     "Vento": {
-        "cor":    0x1ABC9C,   # verde-água/turquesa
-        "emoji":  "🌪️",
-        "alias":  ["vento", "wind"],
+        "color": 0x1ABC9C,  # verde-água/turquesa
+        "emoji": "🌪️",
+        "aliases": ["vento", "wind"],
     },
     "Gelo": {
-        "cor":    0x5DADE2,   # azul claro/ciano
-        "emoji":  "❄️",
-        "alias":  ["gelo", "ice"],
+        "color": 0x5DADE2,  # azul claro/ciano
+        "emoji": "❄️",
+        "aliases": ["gelo", "ice"],
     },
     "Fogo": {
-        "cor":    0xE74C3C,   # laranja/vermelho
-        "emoji":  "🔥",
-        "alias":  ["fogo", "fire"],
+        "color": 0xE74C3C,  # laranja/vermelho
+        "emoji": "🔥",
+        "aliases": ["fogo", "fire"],
     },
     "Fisico": {
-        "cor":    0x95A5A6,   # cinza/branco
-        "emoji":  "⚔️",
-        "alias":  ["fisico", "físico", "phys"],
+        "color": 0x95A5A6,  # cinza/branco
+        "emoji": "⚔️",
+        "aliases": ["fisico", "físico", "phys"],
     },
 }
 
 # Cor especial para crítico (sobrescreve cor do elemento)
-COR_CRITICO    = 0xFF4500   # laranja-vermelho intenso
-COR_GNOSE_ESGOTADA = 0x8B0000  # vermelho escuro
+CRITICAL_COLOR = 0xFF4500  # laranja-vermelho intenso
+DEPLETED_GNOSIS_COLOR = 0x8B0000  # vermelho escuro
 
 # ─────────────────────────────────────────
 # ZONAS DE PODER (escala de dano)
 # ─────────────────────────────────────────
-ZONAS: dict[int, dict] = {
-    1: {"nome": "Humano/Físico",          "teto": 1},
-    2: {"nome": "Poderes Básicos",         "teto": 2},
-    3: {"nome": "Habilidades Avançadas",   "teto": 3},
-    4: {"nome": "Conceitual/Max",          "teto": 4},
+ZONES: dict[int, dict] = {
+    1: {"name": "Human/Physical", "ceiling": 1},
+    2: {"name": "Basic Powers", "ceiling": 2},
+    3: {"name": "Advanced Abilities", "ceiling": 3},
+    4: {"name": "Conceptual/Max", "ceiling": 4},
 }
 
 # ─────────────────────────────────────────
 # STATS BASE DO SISTEMA
 # ─────────────────────────────────────────
 # Nomes canônicos dos atributos aceitos na ficha
-STATS_VALIDOS = ["STR", "RES", "AGI", "SEN", "VIT", "INT"]
+VALID_STATS = ["STR", "RES", "AGI", "SEN", "VIT", "INT"]
 
 # Gnose: pool de PA por combate
-GNOSE_MAX_PADRAO = 9  # pode ser sobrescrito na ficha
+DEFAULT_MAX_GNOSIS = 100  # pode ser sobrescrito na ficha
 
 # ─────────────────────────────────────────
 # MECÂNICAS DE COMBATE
 # ─────────────────────────────────────────
 
-BASE_DANO       = 50   # base fixa antes dos multiplicadores
-MULT_ATK        = 2.0  # (ALTERADO) Multiplicador direto de Força
-MULT_VA         = 1.0  # (ALTERADO) Valoriza mais a nota de criatividade da IA
-MULT_ELEM       = 0.25 
-CRIT_CHANCE     = 15   
-CRIT_BONUS_MULT = 1.5  
+BASE_DAMAGE = 50  # dano base fixo antes dos multiplicadores
+ATK_MULTIPLIER = 2.0  # multiplicador direto de Força
+VA_MULTIPLIER = 1.0  # valoriza mais a avaliação de criatividade da IA
+ELEMENT_MULTIPLIER = 0.25
+CRITICAL_CHANCE = 15
+CRITICAL_BONUS_MULTIPLIER = 1.5
 
-# (ALTERADO) DEF mitiga: 1.2x da RES. 
-# (ALTERADO) VIT mitiga: Apenas metade da VIT vira armadura pura.
-DEF_FORMULA     = lambda res: int(res * 1.2)
-VIT_FORMULA     = lambda vit: int(vit * 0.5)
+# RES mitiga: 1.2x da RES
+# VIT mitiga: Apenas metade da VIT vira armadura pura
+DEF_FORMULA = lambda res: int(res * 1.2)
+VIT_FORMULA = lambda vit: int(vit * 0.5)
 # Fórmula de dano principal (sem crítico, sem elemento):
-# dano = (BASE + MULT_ATK * log(STR) + MULT_VA * VA) * MULT_ELEM_camadas * Zona - DEF - VIT
-# A engine.py implementa isso com RNG e camadas completas.
+# dano = (BASE + ATK_MULTIPLIER * Força + VA_MULTIPLIER * VA) * ELEMENT_MULTIPLIER * Zona - DEF - VIT
+# engine.py implementa isso com RNG e camadas completas.
 
 # ─────────────────────────────────────────
 # DEBUFFS PADRÃO
 # ─────────────────────────────────────────
 DEBUFFS: dict[str, dict] = {
     "Sangramento": {
-        "emoji":    "🩸",
-        "descricao": "Perde HP por turno (STR -20%)",
-        "stat_pen":  {"STR": -0.20},
-        "duracao":   3,
+        "emoji": "🩸",
+        "description": "Perde HP por turno (FOR -20%)",
+        "stat_penalty": {"STR": -0.20},
+        "duration": 3,
     },
     "Queimadura": {
-        "emoji":    "🔥",
-        "descricao": "Dano de fogo por turno",
-        "stat_pen":  {},
-        "duracao":   3,
+        "emoji": "🔥",
+        "description": "Dano de fogo por turno",
+        "stat_penalty": {},
+        "duration": 3,
     },
     "Congelado": {
-        "emoji":    "❄️",
-        "descricao": "AGI reduzida 50%, chance de skip",
-        "stat_pen":  {"AGI": -0.50},
-        "duracao":   2,
+        "emoji": "❄️",
+        "description": "AGI reduzido 50%, chance de pular turno",
+        "stat_penalty": {"AGI": -0.50},
+        "duration": 2,
     },
     "Atordoado": {
-        "emoji":    "💫",
-        "descricao": "Não pode agir no próximo turno",
-        "stat_pen":  {},
-        "duracao":   1,
+        "emoji": "💫",
+        "description": "Não pode agir no próximo turno",
+        "stat_penalty": {},
+        "duration": 1,
     },
     "Corrosao": {
-        "emoji":    "🟢",
-        "descricao": "RES reduzida (Quantum)",
-        "stat_pen":  {"RES": -0.25},
-        "duracao":   3,
+        "emoji": "🟢",
+        "description": "RES reduzido (Quântico)",
+        "stat_penalty": {"RES": -0.25},
+        "duration": 3,
     },
     "Lentidao": {
-        "emoji":    "🌀",
-        "descricao": "AGI reduzida 30%",
-        "stat_pen":  {"AGI": -0.30},
-        "duracao":   2,
+        "emoji": "🌀",
+        "description": "AGI reduzido 30%",
+        "stat_penalty": {"AGI": -0.30},
+        "duration": 2,
+    },
+    "DefesaAtiva": {
+        "emoji": "🛡️",
+        # ADICIONADO: Debuff que representa defesa bem-sucedida. Reduz próximo dano em 50%
+        # e é consumido (removido) após 1 turno. Aplicado quando defesa bem-sucedida em _processar_defesa().
+        "description": "Próximo dano reduzido em 50% (defesa ativa)",
+        "stat_penalty": {},
+        "duration": 1,
     },
 }
 
 # ─────────────────────────────────────────
 # RAID
 # ─────────────────────────────────────────
-HP_BARRA_VERDE   = 0.60   # acima de 60% → verde
-HP_BARRA_AMARELO = 0.30   # entre 30-60% → amarelo
+HP_BAR_GREEN = 0.60  # acima de 60% → verde
+HP_BAR_YELLOW = 0.30  # entre 30-60% → amarelo
 # abaixo de 30% → vermelho
 
-TENACIDADE_BOSS_BASE = 100  # HP da barra de tenacidade
+BASE_BOSS_TENACITY = 100  # HP da barra de tenacidade
 
 # ─────────────────────────────────────────
-# MENSAGENS / TEXTOS UI
+# MENSAGENS UI / TEXTOS
 # ─────────────────────────────────────────
-TITULO_ATAQUE_NORMAL  = "⚔️ Ataque"
-TITULO_ATAQUE_CRITICO = "💥 CRÍTICO!"
-TITULO_GNOSE_ESGOTADA = "⚠️ Gnose Esgotada"
-FOOTER_PADRAO         = "Guaxinim Bot • Sistema de Combate"
+ATTACK_TITLE_NORMAL = "⚔️ Ataque"
+ATTACK_TITLE_CRITICAL = "💥 CRÍTICO!"
+TITLE_GNOSIS_DEPLETED = "⚠️ Gnose Esgotada"
+DEFAULT_FOOTER = "Guaxinim Bot • Sistema de Combate"

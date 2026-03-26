@@ -9,6 +9,7 @@ import re
 import json
 import time
 import logging
+import asyncio
 
 import discord
 from discord import app_commands
@@ -16,18 +17,17 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from cachetools import TTLCache
 
-from config import GUILD_ID, ZONAS
+from config import GUILD_ID, ZONES
 from ficha import (
     FichaPersonagem, carregar_ficha_por_tupper, carregar_ficha_por_nome,
-    salvar_ficha, deletar_ficha, criar_ficha_interativa, FichaParseError,
+    salvar_ficha_async, deletar_ficha, criar_ficha_interativa, FichaParseError,
     carregar_ficha_por_dono,
 )
 from engine import CombatEngine
 from brain import avaliar_acao
 from ui_mvp import build_mensagem_ataque, build_mensagem_ficha, AtaqueView, RaidPainelView
 from debuff import (
-    processar_tick_debuffs, aplicar_escudo,
-    verificar_atordoamento, consumir_atordoamento,
+    verificar_atordoamento,
 )
 from elementos import normalizar_elemento
 
@@ -52,6 +52,67 @@ guild_obj = discord.Object(id=GUILD_ID)
 
 _cooldowns = TTLCache(maxsize=10000, ttl=3.0)
 COOLDOWN_SEG = 3.0
+
+# ADICIONADO: Eu troquei lock global por locks por personagem para evitar race conditions
+# de SP/HP/debuff quando múltiplas ações chegam simultaneamente no mesmo alvo.
+_personagem_locks: dict[str, asyncio.Lock] = {}
+
+# ADICIONADO: Cache de zona de raid para evitar leitura de disco em todo ataque.
+_raid_cache_mtime: float | None = None
+_raid_cache_zona: int | None = None
+
+
+def _get_personagem_lock(nome: str) -> asyncio.Lock:
+    chave = nome.lower().strip()
+    lock = _personagem_locks.get(chave)
+    if lock is None:
+        lock = asyncio.Lock()
+        _personagem_locks[chave] = lock
+    return lock
+
+
+async def _adquirir_locks_personagens(*nomes: str) -> list[asyncio.Lock]:
+    """Adquire locks em ordem estável para evitar deadlock."""
+    locks: list[asyncio.Lock] = []
+    for chave in sorted({n.lower().strip() for n in nomes if n}):
+        lock = _get_personagem_lock(chave)
+        await lock.acquire()
+        locks.append(lock)
+    return locks
+
+
+def _liberar_locks_personagens(locks: list[asyncio.Lock]) -> None:
+    for lock in reversed(locks):
+        if lock.locked():
+            lock.release()
+
+
+def _obter_zona_raid_cache() -> int | None:
+    """Lê zona da raid com cache por mtime para reduzir I/O."""
+    global _raid_cache_mtime, _raid_cache_zona
+
+    arquivo = "raid_estado.json"
+    if not os.path.exists(arquivo) or os.path.getsize(arquivo) <= 0:
+        _raid_cache_mtime = None
+        _raid_cache_zona = None
+        return None
+
+    try:
+        mtime = os.path.getmtime(arquivo)
+        if _raid_cache_mtime == mtime:
+            return _raid_cache_zona
+
+        with open(arquivo, "r", encoding="utf-8") as f:
+            raid_data = json.load(f)
+
+        zona_lida = raid_data.get("zona")
+        _raid_cache_zona = zona_lida if isinstance(zona_lida, int) else None
+        _raid_cache_mtime = mtime
+        log.debug(f"Zona de raid atualizada em cache: {_raid_cache_zona}")
+        return _raid_cache_zona
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"Erro ao ler raid_estado.json: {e}")
+        return _raid_cache_zona
 
 def _check_cooldown(tupper_name: str, channel_id: int) -> bool:
     chave = f"{tupper_name.lower()}:{channel_id}"
@@ -133,10 +194,14 @@ async def on_message(message: discord.Message):
     )
 
     if not avaliacao.get("valida", True):
+        # ADICIONADO: Agora validação REALMENTE funciona. Se IA retorna "valida": False,
+        # mestre consegue rejeitar ações. Motivo é registrado para feedback ao jogador.
+        motivo = avaliacao.get("motivo_invalido", "Ação não aprovada pelo Mestre.")
         await message.channel.send(
-            f"❌ **Ação inválida** — {avaliacao.get('motivo_invalido', 'Mestre não aprovou.')}",
+            f"❌ **Ação inválida** — {motivo}",
             reference=message,
         )
+        log.debug(f"{ficha_atacante.nome} - Ação rejeitada: {motivo}")
         return
 
     tipo = avaliacao.get("tipo", "ataque")
@@ -158,65 +223,109 @@ async def _processar_ataque(
     avaliacao: dict,
     alvo_nome: str | None,
 ):
-    if verificar_atordoamento(ficha_atacante):
-        consumir_atordoamento(ficha_atacante)
-        await message.channel.send(
-            f"💫 **{ficha_atacante.nome}** está **Atordoado** e perde o turno!",
-            reference=message,
-        )
-        return
-
-    ficha_alvo = carregar_ficha_por_nome(alvo_nome) if alvo_nome else None
-
-    if ficha_alvo is None:
-        await message.channel.send(
-            f"⚠️ O alvo `{alvo_nome}` detectado na ação não possui uma ficha registrada.\n"
-            f"Dica para a IA ler melhor: `**Ataca em NomeDoAlvo**`",
-            reference=message,
-        )
-        return
-
-    # =======================================================
-    # SISTEMA DE PERÍCIA (SP)
-    # =======================================================
     categoria_acao = avaliacao.get("categoria_acao", "basico")
-    
-    if categoria_acao == "pericia":
-        if ficha_atacante.sp_atual < 3:
-            await message.channel.send(
-                f"❌ **Falha de Requisito:** SP insuficiente (Atual: `{ficha_atacante.sp_atual}` | Mínimo: `3`).\n"
-                f"**{ficha_atacante.nome}** tentou usar uma perícia exausto e perdeu o turno!",
-                reference=message
-            )
-            return
-        ficha_atacante.sp_atual -= 3
-    else:
-        ficha_atacante.sp_atual = min(ficha_atacante.sp_max, ficha_atacante.sp_atual + 1)
-    # =======================================================
-
     va_ia = avaliacao.get("va", 5)
-    gnose_antes = ficha_atacante.gnose_atual
-
-    resultado = CombatEngine.calcular_ataque(
-        atacante=ficha_atacante,
-        alvo=ficha_alvo,
-        acao=acao,
-        va_override=va_ia,
-    )
-
-    if gnose_antes > 0 and ficha_atacante.gnose_atual <= 0:
-        resultado.gnose_esgotada_antes = True
-
-    dano_real = ficha_alvo.receber_dano(resultado.dano_final)
-    resultado.dano_real = dano_real
-    resultado.hp_restante_alvo = ficha_alvo.hp_atual
-
-    salvar_ficha(ficha_atacante)
-    salvar_ficha(ficha_alvo)
-
     comentario_ia = avaliacao.get("comentario", "")
-    texto, view = build_mensagem_ataque(resultado, ficha_alvo, ficha_atacante, comentario_ia)
 
+    erro_texto: str | None = None
+    perdeu_turno_atordoado = False
+    resultado = None
+    ficha_atacante_atual: FichaPersonagem | None = None
+    ficha_alvo: FichaPersonagem | None = None
+
+    # CORRIGIDO: Eu passei a travar atacante + alvo em ordem estável para impedir
+    # race condition de SP, HP e consumo de DefesaAtiva em ataques simultâneos.
+    locks = await _adquirir_locks_personagens(ficha_atacante.nome, alvo_nome or "")
+    try:
+        ficha_atacante_atual = carregar_ficha_por_nome(ficha_atacante.nome)
+        if ficha_atacante_atual is None:
+            erro_texto = (
+                f"⚠️ Personagem **{ficha_atacante.nome}** não encontrado. "
+                f"Peça ao admin para registrar com `/ficha_registrar`."
+            )
+        else:
+            ficha_alvo = carregar_ficha_por_nome(alvo_nome) if alvo_nome else None
+            if ficha_alvo is None:
+                alvo_msg = alvo_nome or "desconhecido"
+                erro_texto = (
+                    f"⚠️ O alvo `{alvo_msg}` detectado na ação não possui uma ficha registrada.\n"
+                    f"Dica para a IA ler melhor: `**Ataca em NomeDoAlvo**`"
+                )
+            elif verificar_atordoamento(ficha_atacante_atual):
+                # CORRIGIDO: Eu removi o atordoamento dentro da seção crítica e persisti
+                # com salvamento assíncrono para não bloquear a event loop.
+                ficha_atacante_atual.debuffs = [
+                    d for d in ficha_atacante_atual.debuffs if d["nome"] != "Atordoado"
+                ]
+                await salvar_ficha_async(ficha_atacante_atual)
+                perdeu_turno_atordoado = True
+            else:
+                if categoria_acao == "pericia":
+                    if ficha_atacante_atual.sp_atual < 3:
+                        erro_texto = (
+                            f"❌ **Falha de Requisito:** SP insuficiente (Atual: `{ficha_atacante_atual.sp_atual}` | Mínimo: `3`).\n"
+                            f"**{ficha_atacante_atual.nome}** tentou usar uma perícia exausto e perdeu o turno!"
+                        )
+                    else:
+                        ficha_atacante_atual.sp_atual -= 3
+                else:
+                    ficha_atacante_atual.sp_atual = min(
+                        ficha_atacante_atual.sp_max,
+                        ficha_atacante_atual.sp_atual + 1,
+                    )
+
+                if erro_texto is None:
+                    # MELHORADO: Eu uso cache de zona de raid para reduzir leitura de disco por ataque.
+                    zona_raid = _obter_zona_raid_cache()
+                    resultado = CombatEngine.calcular_ataque(
+                        atacante=ficha_atacante_atual,
+                        alvo=ficha_alvo,
+                        acao=acao,
+                        va_override=va_ia,
+                        zona_raid=zona_raid,
+                    )
+
+                    dano_real = ficha_alvo.receber_dano(resultado.dano_final)
+                    resultado.dano_real = dano_real
+                    resultado.hp_restante_alvo = ficha_alvo.hp_atual
+
+                    defesa_ativa = ficha_alvo.tem_debuff("DefesaAtiva")
+                    if defesa_ativa:
+                        dano_reduzido = int(dano_real * 0.5)
+                        diferenca = dano_real - dano_reduzido
+                        ficha_alvo.hp_atual = min(ficha_alvo.hp_max, ficha_alvo.hp_atual + diferenca)
+                        resultado.dano_real = dano_reduzido
+                        ficha_alvo.debuffs = [d for d in ficha_alvo.debuffs if d["nome"] != "DefesaAtiva"]
+                        log.debug(
+                            f"{ficha_alvo.nome} - DefesaAtiva ativada: "
+                            f"dano reduzido de {dano_real} para {dano_reduzido}"
+                        )
+
+                    # MELHORADO: Eu troquei salvamento síncrono por assíncrono no caminho quente de combate.
+                    await salvar_ficha_async(ficha_atacante_atual)
+                    await salvar_ficha_async(ficha_alvo)
+    finally:
+        _liberar_locks_personagens(locks)
+
+    if perdeu_turno_atordoado and ficha_atacante_atual is not None:
+        await message.channel.send(
+            f"💫 **{ficha_atacante_atual.nome}** está **Atordoado** e perde o turno!",
+            reference=message,
+        )
+        return
+
+    if erro_texto:
+        await message.channel.send(erro_texto, reference=message)
+        return
+
+    if resultado is None or ficha_alvo is None or ficha_atacante_atual is None:
+        await message.channel.send(
+            "❌ Não foi possível processar o ataque neste turno.",
+            reference=message,
+        )
+        return
+
+    texto, view = build_mensagem_ataque(resultado, ficha_alvo, ficha_atacante_atual, comentario_ia)
     await message.channel.send(content=texto, view=view, reference=message)
 
     if not ficha_alvo.esta_vivo:
@@ -235,25 +344,43 @@ async def _processar_defesa(
     acao: str,
     avaliacao: dict,
 ):
-    resultado_def = CombatEngine.calcular_defesa(ficha_defensor)
-    comentario_ia = avaliacao.get("comentario", "")
+    # MELHORADO: Eu serializei defesa por personagem para evitar conflito com ataques simultâneos.
+    locks = await _adquirir_locks_personagens(ficha_defensor.nome)
+    try:
+        ficha_defensor = carregar_ficha_por_nome(ficha_defensor.nome) or ficha_defensor
+        resultado_def = CombatEngine.calcular_defesa(ficha_defensor)
 
-    if resultado_def["sucesso"]:
-        texto = (
-            f"🛡️ **{ficha_defensor.nome}** se defende!\n"
-            f"> *{acao}*\n\n"
-            f"✅ Esquiva/Bloqueio bem-sucedido! "
-            f"Chance: `{resultado_def['chance']:.0f}%` · AGI `{resultado_def['agi_usado']}`\n"
-            f"O próximo dano recebido será reduzido em **50%**.\n"
-            f"🎭 *\"{comentario_ia}\"*" if comentario_ia else ""
-        )
-    else:
-        texto = (
-            f"💢 **{ficha_defensor.nome}** tentou se defender...\n"
-            f"> *{acao}*\n\n"
-            f"❌ Falhou. Chance era `{resultado_def['chance']:.0f}%` · AGI `{resultado_def['agi_usado']}`\n"
-            f"🎭 *\"{comentario_ia}\"*" if comentario_ia else ""
-        )
+        comentario_ia = avaliacao.get("comentario", "")
+
+        if resultado_def["sucesso"]:
+            # CORRIGIDO: Ternário estava aplicado à string inteira, perdendo mensagem se comentário vazio.
+            # Agora constrói a mensagem completa SEMPRE, e apenas adiciona comentário se existir.
+            texto = (
+                f"🛡️ **{ficha_defensor.nome}** se defende!\n"
+                f"> *{acao}*\n\n"
+                f"✅ Esquiva/Bloqueio bem-sucedido! "
+                f"Chance: `{resultado_def['chance']:.0f}%` · AGI `{resultado_def['agi_usado']}`\n"
+                f"O próximo dano recebido será reduzido em **50%**.\n"
+            )
+            if comentario_ia:
+                texto += f"🎭 *\"{comentario_ia}\"*"
+
+            # ADICIONADO: Quando defesa bem-sucedida, aplico debuff "DefesaAtiva" que durará 1 turno.
+            # Este debuff será verificado em _processar_ataque() para reduzir dano em 50%.
+            ficha_defensor.adicionar_debuff("DefesaAtiva", duracao=1)
+            await salvar_ficha_async(ficha_defensor)
+            log.debug(f"{ficha_defensor.nome} - DefesaAtiva aplicado (duração: 1 turno)")
+        else:
+            # CORRIGIDO: Mesma lógica para falha
+            texto = (
+                f"💢 **{ficha_defensor.nome}** tentou se defender...\n"
+                f"> *{acao}*\n\n"
+                f"❌ Falhou. Chance era `{resultado_def['chance']:.0f}%` · AGI `{resultado_def['agi_usado']}`\n"
+            )
+            if comentario_ia:
+                texto += f"🎭 *\"{comentario_ia}\"*"
+    finally:
+        _liberar_locks_personagens(locks)
 
     await message.channel.send(content=texto, reference=message)
 
@@ -304,7 +431,7 @@ async def descansar(interaction: discord.Interaction, personagem: str):
         return
 
     recuperado = CombatEngine.descansar_gnose(ficha)
-    salvar_ficha(ficha)
+    await salvar_ficha_async(ficha)
 
     await interaction.response.send_message(
         f"✨ **{ficha.nome}** descansou e recuperou **{recuperado}** de Gnose.\n"
@@ -399,7 +526,7 @@ async def ficha_registrar(
             str_=str_, res=res, agi=agi, sen=sen, vit=vit, int_=int_,
             rebirths=rebirths, gnose_max=gnose_max, zona=zona,
         )
-        salvar_ficha(ficha)
+        await salvar_ficha_async(ficha)
         
         embed, view = build_mensagem_ficha(ficha, dono)
         await interaction.response.send_message(f"✅ Ficha de **{nome}** registrada!", embed=embed, view=view)
@@ -426,7 +553,7 @@ async def ficha_rebirth(interaction: discord.Interaction, personagem: str, quant
         return
     ficha.rebirths += quantidade
     ficha.recalcular_hp_max()
-    salvar_ficha(ficha)
+    await salvar_ficha_async(ficha)
     await interaction.response.send_message(
         f"🔄 **{ficha.nome}** recebeu **+{quantidade}** Rebirth(s)!\n"
         f"Total: `{ficha.rebirths}` · HP Máx: `{ficha.hp_max}`"
@@ -436,7 +563,8 @@ async def ficha_rebirth(interaction: discord.Interaction, personagem: str, quant
 @app_commands.describe(zona="Zona (1-4)")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def raid_zona(interaction: discord.Interaction, zona: int):
-    if zona not in ZONAS:
+    global _raid_cache_mtime, _raid_cache_zona
+    if zona not in ZONES:
         await interaction.response.send_message("❌ Zona inválida (1-4).", ephemeral=True)
         return
     arquivo = "raid_estado.json"
@@ -447,8 +575,14 @@ async def raid_zona(interaction: discord.Interaction, zona: int):
     estado["zona"] = zona
     with open(arquivo, "w", encoding="utf-8") as f:
         json.dump(estado, f, indent=2)
+
+    # ADICIONADO: Eu atualizei o cache em memória no mesmo comando para refletir a
+    # nova zona imediatamente, sem depender da próxima leitura em disco.
+    _raid_cache_zona = zona
+    _raid_cache_mtime = os.path.getmtime(arquivo)
+
     await interaction.response.send_message(
-        f"🌀 Zona definida: **Zona {zona} — {ZONAS[zona]['nome']}**."
+        f"🌀 Zona definida: **Zona {zona} — {ZONES[zona]['name']}**."
     )
 
 @bot.tree.command(guild=guild_obj, name="boss_kill_heal", description="[Admin] Dano ou cura no boss.")
@@ -465,7 +599,7 @@ async def boss_kill_heal(interaction: discord.Interaction, boss: str, valor: int
     else:
         curado = ficha.curar(abs(valor))
         msg = f"💚 **{boss}** foi curado em **{curado}** HP."
-    salvar_ficha(ficha)
+    await salvar_ficha_async(ficha)
     await interaction.response.send_message(f"{msg}\nHP: `{ficha.hp_atual}/{ficha.hp_max}`")
 
 @bot.tree.command(guild=guild_obj, name="boss_template", description="[Admin] Define personalidade do boss.")

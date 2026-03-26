@@ -14,10 +14,10 @@ import random
 from dataclasses import dataclass
 
 from config import (
-    BASE_DANO, MULT_ATK, MULT_VA, MULT_ELEM,
-    CRIT_CHANCE, CRIT_BONUS_MULT,
+    BASE_DAMAGE, ATK_MULTIPLIER, VA_MULTIPLIER, ELEMENT_MULTIPLIER,
+    CRITICAL_CHANCE, CRITICAL_BONUS_MULTIPLIER,
     DEF_FORMULA, VIT_FORMULA,
-    ZONAS,
+    ZONES,
 )
 from elementos import calcular_bonus_elemental, get_variante_paranormal
 from ficha import FichaPersonagem
@@ -69,13 +69,19 @@ class CombatEngine:
         e_combo: bool = False,
         parceiro_combo: FichaPersonagem | None = None,
         va_override: int | None = None,
+        zona_raid: int | None = None,
     ) -> ResultadoAtaque:
         """
         Calcula o ataque completo e retorna ResultadoAtaque.
         Não aplica dano ao alvo — isso é feito em main.py.
+        
+        ADICIONADO: zona_raid permite sobrescrever zona individual por zona de raid global.
         """
 
         # ── 1. GNOSE & ESTADOS ──────────
+        # ADICIONADO: Se zona_raid passada (do raid_estado.json), usa ela ao invés da individual
+        zona_efetiva = zona_raid if zona_raid is not None else atacante.zona
+        
         gnose_esgotada_antes = atacante.gnose_esgotada
         if not gnose_esgotada_antes and not atacante.is_secundario:
             sucesso_gnose = atacante.gastar_gnose(custo_gnose)
@@ -84,19 +90,22 @@ class CombatEngine:
             penalidade_gnose = 0.5 if gnose_esgotada_antes else 1.0
 
         # Avalia os buffs e debuffs passivos baseados na Gnose
-        estado_atk = CombatEngine.avaliar_estado_gnose(atacante.gnose_atual, atacante.zona)
-        estado_alvo = CombatEngine.avaliar_estado_gnose(alvo.gnose_atual, alvo.zona)
+        estado_atk = CombatEngine.avaliar_estado_gnose(atacante.gnose_atual, zona_efetiva)
+        estado_alvo = CombatEngine.avaliar_estado_gnose(alvo.gnose_atual, zona_efetiva)
 
         # ── 2. RNG (d20) ─────────────────
         rng = random.randint(1, 20)
-        rng_bonus = int((rng / 20) * 20)
+        # CORRIGIDO: A fórmula anterior int((rng / 20) * 20) era inútil - sempre retornava o valor
+        # de rng original. Agora usa o RNG diretamente como bônus de dano (1-20 de variação).
+        # Escala: d20 (1-20) vira bônus de dano aditivo (1-20 a mais no dano final).
+        rng_bonus = rng
 
         # ── 3. BASE + ATK ────────────────
         str_efetivo = CombatEngine._stat_com_debuff(atacante, "STR")
         
         # Aplica o Buff de Gnose (>80) direto no multiplicador de Força
-        atk_component = (MULT_ATK * str_efetivo) * (1.0 + estado_atk["atk_buff"])
-        base_component = BASE_DANO
+        atk_component = (ATK_MULTIPLIER * str_efetivo) * (1.0 + estado_atk["atk_buff"])
+        base_component = BASE_DAMAGE
 
         # ── 4. VANTAGEM DE AÇÃO (VA) ─────
         if va_override is not None:
@@ -104,7 +113,7 @@ class CombatEngine:
         else:
             agi_efetivo = CombatEngine._stat_com_debuff(atacante, "AGI")
             va = min(10, max(0, agi_efetivo // 3))
-        va_component = MULT_VA * va * 5
+        va_component = VA_MULTIPLIER * va * 5
 
         # ── 5. ELEMENTO ──────────────────
         elem_atacante = atacante.elemento_main
@@ -117,7 +126,7 @@ class CombatEngine:
 
         mult_elem = calcular_bonus_elemental(elem_atacante, elem_alvo)
         mult_elem += bonus_paranormal
-        elem_component = MULT_ELEM * (mult_elem - 1.0) * 100
+        elem_component = ELEMENT_MULTIPLIER * (mult_elem - 1.0) * 100
 
         # ── 6. SOMA PRÉ-CRIT ─────────────
         dano_pre_crit = (
@@ -126,22 +135,22 @@ class CombatEngine:
 
         # ── 7. CRÍTICO ───────────────────
         sen_efetivo = CombatEngine._stat_com_debuff(atacante, "SEN")
-        crit_chance_real = CRIT_CHANCE + (sen_efetivo // 5)
+        crit_chance_real = CRITICAL_CHANCE + (sen_efetivo // 5)
         e_critico = random.randint(1, 100) <= crit_chance_real
-        dano_pos_crit = dano_pre_crit * (CRIT_BONUS_MULT if e_critico else 1.0)
+        dano_pos_crit = dano_pre_crit * (CRITICAL_BONUS_MULTIPLIER if e_critico else 1.0)
 
         # ── 8. COMBO ─────────────────────
         combo_bonus = 0
         if e_combo and parceiro_combo:
             str_parceiro = CombatEngine._stat_com_debuff(parceiro_combo, "STR")
-            dano_parceiro = (MULT_ATK * str_parceiro) + (BASE_DANO * 0.5)
+            dano_parceiro = (ATK_MULTIPLIER * str_parceiro) + (BASE_DAMAGE * 0.5)
             dano_pre_combo = dano_pos_crit + dano_parceiro
             combo_bonus    = int(dano_pre_combo * 0.3)
             dano_pos_crit  = dano_pre_combo * 1.3
 
         # ── 9. ZONA ──────────────────────
-        zona = atacante.zona
-        zona_mult = 1 + (zona - 1) * 0.25
+        # ADICIONADO: Usa zona_efetiva (que pode ser zona_raid global ao invés da individual)
+        zona_mult = 1 + (zona_efetiva - 1) * 0.25
         dano_pos_zona = dano_pos_crit * zona_mult
 
         # ── 10. DEFESA E BLINDAGEM ───────
@@ -175,10 +184,11 @@ class CombatEngine:
             "rng":              rng_bonus,
             "penalidade_gnose": penalidade_gnose,
             "critico":          e_critico,
-            "crit_mult":        CRIT_BONUS_MULT if e_critico else 1.0,
+            "crit_mult":        CRITICAL_BONUS_MULTIPLIER if e_critico else 1.0,
             "combo":            e_combo,
             "combo_bonus":      combo_bonus,
-            "zona":             zona,
+            # ADICIONADO: Log da zona efetiva (pode ser raid ou individual)
+            "zona":             zona_efetiva,
             "zona_mult":        zona_mult,
             "def_mitiga":       int(def_mitiga),
             "vit_mitiga":       int(vit_mitiga),
@@ -201,7 +211,9 @@ class CombatEngine:
             bonus_elemental=round(mult_elem, 2),
             debuff_aplicado=debuff_aplicado,
             rng_valor=rng,
-            zona=zona,
+            # CORRIGIDO: Eu estava retornando a variável errada (zona inexistente aqui),
+            # o que quebrava em runtime e ainda podia mostrar zona incorreta no resultado.
+            zona=zona_efetiva,
             hp_restante_alvo=alvo.hp_atual,
             gnose_restante=atacante.gnose_atual,
             breakdown=breakdown,
@@ -218,13 +230,15 @@ class CombatEngine:
             "aviso_esgotamento": False
         }
 
-        if gnose > 80:
+        # CORRIGIDO: Eu tinha um gap em gnose == 80 que não era capturado por nenhum branch.
+        # Agora gnose >= 80 (ao invés de gnose > 80) captura 80 como começo do escalão HIGH.
+        if gnose >= 80:
             degraus = (gnose - 80) // 5
             incremento_zona = 0.01 + (zona * 0.01)
             estado["atk_buff"] = degraus * incremento_zona
             estado["def_buff"] = 0.35 
 
-        elif 50 <= gnose <= 79:
+        elif 50 <= gnose < 80:
             estado["def_buff"] = max(0.0, (35 - (79 - gnose)) / 100.0)
             if gnose == 50:
                 estado["aviso_esgotamento"] = True
@@ -285,7 +299,9 @@ class CombatEngine:
         for debuff_ativo in personagem.debuffs:
             nome_debuff = debuff_ativo["nome"]
             if nome_debuff in DEBUFFS:
-                pen = DEBUFFS[nome_debuff].get("stat_pen", {})
+                # CORRIGIDO: Eu estava usando a chave errada 'stat_pen' mas em config.py
+                # os debuffs têm a chave 'stat_penalty'. Agora busca a chave correta.
+                pen = DEBUFFS[nome_debuff].get("stat_penalty", {})
                 if stat in pen:
                     multiplicador += pen[stat]
         return max(1, int(base * multiplicador))
@@ -296,7 +312,7 @@ class CombatEngine:
         alvo: FichaPersonagem,
         elemento: str,
     ) -> str | None:
-        from elementos import get_debuff_elemento, CHANCE_DEBUFF_BASE
+        from elementos import get_debuff_elemento, BASE_DEBUFF_CHANCE
         from config import DEBUFFS
 
         debuff_info = get_debuff_elemento(elemento)
@@ -304,10 +320,12 @@ class CombatEngine:
             return None
 
         sen = CombatEngine._stat_com_debuff(atacante, "SEN")
-        chance = CHANCE_DEBUFF_BASE + (sen / 200)
+        chance = BASE_DEBUFF_CHANCE + (sen / 200)
 
         if random.random() < chance:
-            duracao = debuff_info.get("duracao", 2)
+            # CORRIGIDO: Eu alinhei a leitura de duração com o formato de config.py ("duration")
+            # e mantive fallback para "duracao" para compatibilidade com dados antigos.
+            duracao = debuff_info.get("duration", debuff_info.get("duracao", 2))
             alvo.adicionar_debuff(debuff_info["nome"], duracao)
             return debuff_info["nome"]
 
