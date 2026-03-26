@@ -5,7 +5,7 @@ Fórmula de dano completa: Base + ATK + VA + Elem + Crit + RNG + Zona - DEF - VI
 CORREÇÕES aplicadas:
     - va_override: aceita VA externo da IA (brain.py) em vez de usar só AGI
     - combo_bonus: calculado antes de aplicar o ×1.3, não depois
-    - gnose_esgotada_antes: flag passada por main.py após gastar Gnose
+    - Integração do avaliar_estado_gnose no cálculo de combate ativo.
 """
 
 from __future__ import annotations
@@ -73,12 +73,9 @@ class CombatEngine:
         """
         Calcula o ataque completo e retorna ResultadoAtaque.
         Não aplica dano ao alvo — isso é feito em main.py.
-
-        va_override: VA vindo da avaliação da IA (0-10).
-                     Se None, usa AGI // 3 como proxy.
         """
 
-        # ── 1. GNOSE ────────────────────
+        # ── 1. GNOSE & ESTADOS ──────────
         gnose_esgotada_antes = atacante.gnose_esgotada
         if not gnose_esgotada_antes and not atacante.is_secundario:
             sucesso_gnose = atacante.gastar_gnose(custo_gnose)
@@ -86,17 +83,22 @@ class CombatEngine:
         else:
             penalidade_gnose = 0.5 if gnose_esgotada_antes else 1.0
 
+        # Avalia os buffs e debuffs passivos baseados na Gnose
+        estado_atk = CombatEngine.avaliar_estado_gnose(atacante.gnose_atual, atacante.zona)
+        estado_alvo = CombatEngine.avaliar_estado_gnose(alvo.gnose_atual, alvo.zona)
+
         # ── 2. RNG (d20) ─────────────────
         rng = random.randint(1, 20)
         rng_bonus = int((rng / 20) * 20)
 
         # ── 3. BASE + ATK ────────────────
         str_efetivo = CombatEngine._stat_com_debuff(atacante, "STR")
-        atk_component = MULT_ATK * math.log(max(str_efetivo, 1)) * 10
+        
+        # Aplica o Buff de Gnose (>80) direto no multiplicador de Força
+        atk_component = (MULT_ATK * str_efetivo) * (1.0 + estado_atk["atk_buff"])
         base_component = BASE_DANO
 
         # ── 4. VANTAGEM DE AÇÃO (VA) ─────
-        # CORREÇÃO: usa VA da IA se fornecido, senão fallback para AGI
         if va_override is not None:
             va = min(10, max(0, va_override))
         else:
@@ -129,13 +131,12 @@ class CombatEngine:
         dano_pos_crit = dano_pre_crit * (CRIT_BONUS_MULT if e_critico else 1.0)
 
         # ── 8. COMBO ─────────────────────
-        # CORREÇÃO: salva o bônus ANTES de multiplicar pelo ×1.3
         combo_bonus = 0
         if e_combo and parceiro_combo:
             str_parceiro = CombatEngine._stat_com_debuff(parceiro_combo, "STR")
-            dano_parceiro = MULT_ATK * math.log(max(str_parceiro, 1)) * 10 + BASE_DANO * 0.5
+            dano_parceiro = (MULT_ATK * str_parceiro) + (BASE_DANO * 0.5)
             dano_pre_combo = dano_pos_crit + dano_parceiro
-            combo_bonus    = int(dano_pre_combo * 0.3)   # bônus = 30% do subtotal
+            combo_bonus    = int(dano_pre_combo * 0.3)
             dano_pos_crit  = dano_pre_combo * 1.3
 
         # ── 9. ZONA ──────────────────────
@@ -143,14 +144,24 @@ class CombatEngine:
         zona_mult = 1 + (zona - 1) * 0.25
         dano_pos_zona = dano_pos_crit * zona_mult
 
-        # ── 10. DEFESA ───────────────────
+        # ── 10. DEFESA E BLINDAGEM ───────
         res_alvo = CombatEngine._stat_com_debuff(alvo, "RES")
         vit_alvo = CombatEngine._stat_com_debuff(alvo, "VIT")
-        def_mitiga   = DEF_FORMULA(res_alvo)
+        
+        # Aplica buff de defesa da Gnose (50-79) no alvo
+        def_mitiga   = DEF_FORMULA(res_alvo) * (1.0 + estado_alvo["def_buff"])
         vit_mitiga   = VIT_FORMULA(vit_alvo)
+        
+        # Se a Gnose zerou, a blindagem quebra e a defesa do alvo é ignorada
+        if not estado_alvo["blindagem_ativa"]:
+            def_mitiga = 0
+            
         total_mitiga = def_mitiga + vit_mitiga
 
-        dano_final = max(1, int(dano_pos_zona - total_mitiga))
+        dano_mitigado = max(1, dano_pos_zona - total_mitiga)
+        
+        # Aplica a Vulnerabilidade Acumulada da Gnose (< 30)
+        dano_final = int(dano_mitigado * (1.0 + estado_alvo["vuln"]))
         dano_base  = int(dano_pos_zona)
 
         # ── 11. DEBUFF ───────────────────
@@ -169,9 +180,9 @@ class CombatEngine:
             "combo_bonus":      combo_bonus,
             "zona":             zona,
             "zona_mult":        zona_mult,
-            "def_mitiga":       def_mitiga,
-            "vit_mitiga":       vit_mitiga,
-            "total_mitiga":     total_mitiga,
+            "def_mitiga":       int(def_mitiga),
+            "vit_mitiga":       int(vit_mitiga),
+            "total_mitiga":     int(total_mitiga),
             "mult_elem":        round(mult_elem, 2),
         }
 
@@ -195,6 +206,49 @@ class CombatEngine:
             gnose_restante=atacante.gnose_atual,
             breakdown=breakdown,
         )
+    
+    @staticmethod
+    def avaliar_estado_gnose(gnose: int, zona: int) -> dict:
+        """Calcula os multiplicadores exatos com base nos escalões de Gnose solicitados."""
+        estado = {
+            "atk_buff": 0.0,
+            "def_buff": 0.0,
+            "vuln": 0.0,
+            "blindagem_ativa": True,
+            "aviso_esgotamento": False
+        }
+
+        if gnose > 80:
+            degraus = (gnose - 80) // 5
+            incremento_zona = 0.01 + (zona * 0.01)
+            estado["atk_buff"] = degraus * incremento_zona
+            estado["def_buff"] = 0.35 
+
+        elif 50 <= gnose <= 79:
+            estado["def_buff"] = max(0.0, (35 - (79 - gnose)) / 100.0)
+            if gnose == 50:
+                estado["aviso_esgotamento"] = True
+
+        elif 30 <= gnose < 50:
+            pass
+
+        elif 0 < gnose < 30:
+            pontos_perdidos = 30 - gnose
+            estado["vuln"] = pontos_perdidos * 0.005
+
+        elif gnose <= 0:
+            estado["vuln"] = (30 * 0.005) + 0.20 
+            estado["blindagem_ativa"] = False
+
+        return estado
+
+    @staticmethod
+    def calcular_poder_ultimate(gnose_gasta: int, sp_gasto: int) -> dict:
+        pen_res = (sp_gasto * 0.007) + ((gnose_gasta // 10) * 0.007)
+        mult_atk = 1.0
+        if gnose_gasta > 75 and sp_gasto > 7:
+            mult_atk = 2.5 
+        return {"pen_res": pen_res, "mult_atk": mult_atk}
 
     # ── DEFESA / ESQUIVA ────────────────
     @staticmethod

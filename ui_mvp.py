@@ -1,10 +1,6 @@
 """
 ui_mvp.py — Guaxinim Bot
 Resposta de combate: texto narrativo simples + 3 botões expansíveis.
-
-Botão 1 — 👤 Status dos jogadores  (HP, Gnose, debuffs de atacante e alvo)
-Botão 2 — 🧮 Detalhes do cálculo   (fórmula explicada passo a passo)
-Botão 3 — 💀 Status do boss        (HP, zona, tenacidade — busca por nome do alvo)
 """
 
 from __future__ import annotations
@@ -32,11 +28,19 @@ def barra_hp(atual: int, maximo: int, tamanho: int = 10) -> str:
     bloco = "🟩" if pct > HP_BARRA_VERDE else ("🟨" if pct > HP_BARRA_AMARELO else "🟥")
     return bloco * cheio + "⬛" * vazio + f" `{atual}/{maximo}`"
 
-
-def barra_gnose(atual: int, maximo: int) -> str:
+def barra_gnose(atual: int, maximo: int, tamanho: int = 10) -> str:
     if maximo <= 0:
         return "Sem Gnose"
-    return "◆" * atual + "◇" * (maximo - atual) + f" `{atual}/{maximo}`"
+    pct = max(0.0, min(1.0, atual / maximo))
+    cheio = round(pct * tamanho)
+    vazio = tamanho - cheio
+    return "🟦" * cheio + "⬛" * vazio + f" `{atual}/{maximo}`"
+
+def barra_sp(atual: int, maximo: int) -> str:
+    if maximo <= 0:
+        return "Sem SP"
+    atual_safe = max(0, atual)
+    return "🌟" * atual_safe + "🌑" * max(0, (maximo - atual_safe)) + f" `{atual_safe}/{maximo}`"
 
 
 # ─────────────────────────────────────────
@@ -48,15 +52,10 @@ def _montar_texto_ataque(
     ficha_alvo: FichaPersonagem,
     comentario_ia: str,
 ) -> str:
-    """
-    Texto limpo e narrativo enviado como mensagem principal.
-    Sem embed — apenas markdown do Discord.
-    """
     elem_emoji = get_emoji_elemento(resultado.elemento)
     nome_atk   = resultado.atacante
     nome_alvo  = resultado.alvo
 
-    # Linha de abertura varia por tipo de resultado
     if resultado.e_critico:
         titulo = f"## 💥 CRÍTICO! — {nome_atk}"
     elif resultado.gnose_esgotada_antes:
@@ -64,10 +63,8 @@ def _montar_texto_ataque(
     else:
         titulo = f"## {elem_emoji} {nome_atk} ataca!"
 
-    # Ação narrada
     linha_acao = f"> *{resultado.acao}*"
 
-    # Resultado do dano
     if resultado.e_critico:
         linha_dano = (
             f"**{nome_atk}** desferiu um golpe devastador em **{nome_alvo}** "
@@ -89,7 +86,6 @@ def _montar_texto_ataque(
             f"**{resultado.dano_final} de dano** {elem_emoji}{mult_str}"
         )
 
-    # HP do alvo pós-dano
     hp_pct = ficha_alvo.hp_atual / ficha_alvo.hp_max if ficha_alvo.hp_max > 0 else 0
     if hp_pct <= 0:
         estado_hp = f"💀 **{nome_alvo}** está com `0 HP`!"
@@ -100,17 +96,14 @@ def _montar_texto_ataque(
     else:
         estado_hp = f"🟩 **{nome_alvo}** ainda está de pé: `{ficha_alvo.hp_atual}/{ficha_alvo.hp_max} HP`"
 
-    # Debuff aplicado
     linha_debuff = ""
     if resultado.debuff_aplicado:
         from config import DEBUFFS
         emoji_db = DEBUFFS.get(resultado.debuff_aplicado, {}).get("emoji", "⚠️")
         linha_debuff = f"\n{emoji_db} **{nome_alvo}** ficou com **{resultado.debuff_aplicado}**!"
 
-    # Comentário do Mestre IA
     linha_ia = f"\n🎭 *\"{comentario_ia}\"*" if comentario_ia else ""
 
-    # Gnose esgotou neste turno → aviso
     linha_gnose_warn = ""
     if resultado.gnose_esgotada_antes and resultado.gnose_restante == 0:
         linha_gnose_warn = f"\n✨ Gnose de **{nome_atk}** esgotada — use `/descansar` para recuperar."
@@ -132,13 +125,6 @@ def _montar_texto_ataque(
 # ─────────────────────────────────────────
 
 class AtaqueView(discord.ui.View):
-    """
-    View persistida por 5 minutos com 3 botões:
-    1. 👤 Status dos jogadores
-    2. 🧮 Detalhes do cálculo
-    3. 💀 Status do boss/alvo
-    """
-
     def __init__(
         self,
         resultado: ResultadoAtaque,
@@ -150,32 +136,22 @@ class AtaqueView(discord.ui.View):
         self.ficha_alvo     = ficha_alvo
         self.ficha_atacante = ficha_atacante
 
-    # ── Botão 1: Status dos jogadores ──
     @discord.ui.button(label="👤 Jogadores", style=discord.ButtonStyle.secondary)
-    async def btn_jogadores(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
+    async def btn_jogadores(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = _embed_status_jogadores(self.resultado, self.ficha_alvo, self.ficha_atacante)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── Botão 2: Detalhes do cálculo ───
     @discord.ui.button(label="🧮 Cálculo", style=discord.ButtonStyle.secondary)
-    async def btn_calculo(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
+    async def btn_calculo(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = _embed_detalhes_calculo(self.resultado)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── Botão 3: Status do boss/alvo ───
     @discord.ui.button(label="💀 Boss", style=discord.ButtonStyle.secondary)
-    async def btn_boss(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
+    async def btn_boss(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = _embed_status_boss(self.ficha_alvo)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def on_timeout(self):
-        # Desabilita botões ao expirar
         for item in self.children:
             item.disabled = True
 
@@ -192,18 +168,19 @@ def _embed_status_jogadores(
     cor = get_cor_elemento(resultado.elemento)
     embed = discord.Embed(title="👤 Status dos Jogadores", color=cor)
 
-    # ── Atacante ──
-    atk_gnose = (
-        barra_gnose(resultado.gnose_restante, ficha_atacante.gnose_max)
-        if not ficha_atacante.is_secundario
-        else "*Sem Gnose (Paranormal)*"
-    )
+    if not ficha_atacante.is_secundario:
+        atk_gnose = barra_gnose(resultado.gnose_restante, ficha_atacante.gnose_max)
+        atk_sp = barra_sp(getattr(ficha_atacante, 'sp_atual', 0), getattr(ficha_atacante, 'sp_max', 10))
+        status_energia = f"✨ Gnose: {atk_gnose}\n⭐ SP: {atk_sp}\n"
+    else:
+        status_energia = "*Sem Gnose/SP (Paranormal)*\n"
+
     atk_debuffs = formatar_debuffs_embed(ficha_atacante)
     embed.add_field(
         name=f"{get_emoji_elemento(ficha_atacante.elemento_main)} {ficha_atacante.nome} *(atacante)*",
         value=(
             f"❤️ HP: {barra_hp(ficha_atacante.hp_atual, ficha_atacante.hp_max)}\n"
-            f"✨ Gnose: {atk_gnose}\n"
+            f"{status_energia}"
             f"🩻 Debuffs: {atk_debuffs}"
         ),
         inline=False,
@@ -211,7 +188,6 @@ def _embed_status_jogadores(
 
     embed.add_field(name="\u200b", value="\u200b", inline=False)
 
-    # ── Alvo ──
     alvo_debuffs = formatar_debuffs_embed(ficha_alvo)
     embed.add_field(
         name=f"{get_emoji_elemento(ficha_alvo.elemento_main)} {ficha_alvo.nome} *(alvo)*",
@@ -236,20 +212,16 @@ def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
 
     embed = discord.Embed(
         title="🧮 Detalhes do Cálculo",
-        description=(
-            f"Veja como o dano de **{resultado.dano_final}** foi calculado, "
-            f"passo a passo:"
-        ),
+        description=(f"Veja como o dano de **{resultado.dano_final}** foi calculado, passo a passo:"),
         color=cor,
     )
 
-    # ── Passo 1: Componentes base ──
     embed.add_field(
         name="1️⃣ Componentes de Ataque",
         value=(
             f"```\n"
             f"Base fixo         = {bd['base']:>6}\n"
-            f"ATK log(STR)      = {bd['atk_log']:>6}  (força bruta)\n"
+            f"ATK (Força)       = {bd['atk_log']:>6}  (força bruta)\n"
             f"VA (qualid. ação) = {bd['va']:>6}  (avaliação do Mestre)\n"
             f"Bônus RNG d20     = {bd['rng']:>6}  (dado: {resultado.rng_valor}/20)\n"
             f"─────────────────────────\n"
@@ -259,23 +231,17 @@ def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
         inline=False,
     )
 
-    # ── Passo 2: Modificadores ──
-    penalidade_str = (
-        "✅ Normal (×1.0)" if bd["penalidade_gnose"] == 1.0
-        else "⚠️ Sem Gnose (×0.5)"
-    )
+    penalidade_str = "✅ Normal (×1.0)" if bd["penalidade_gnose"] == 1.0 else "⚠️ Sem Gnose (×0.5)"
     embed.add_field(
         name="2️⃣ Modificadores",
         value=(
             f"**Gnose:** {penalidade_str}\n"
-            f"**Elemento {resultado.elemento}:** ×{bd['mult_elem']:.2f} "
-            f"*(bônus elemental = +{bd['elem']} pts)*\n"
+            f"**Elemento {resultado.elemento}:** ×{bd['mult_elem']:.2f} *(bônus elemental = +{bd['elem']} pts)*\n"
             f"**Zona {bd['zona']}:** ×{bd['zona_mult']:.2f}"
         ),
         inline=False,
     )
 
-    # ── Passo 3: Crítico / Combo ──
     crit_str = f"💥 **SIM** — dano multiplicado por ×{bd['crit_mult']:.1f}" if bd["critico"] else "Não"
     combo_str = f"⚔️ **SIM** — bônus de +{bd['combo_bonus']}" if bd["combo"] else "Não"
     embed.add_field(
@@ -284,7 +250,6 @@ def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
         inline=False,
     )
 
-    # ── Passo 4: Defesa e resultado final ──
     embed.add_field(
         name="4️⃣ Defesas do Alvo",
         value=(
@@ -371,7 +336,7 @@ def _embed_status_boss(ficha_alvo: FichaPersonagem) -> discord.Embed:
 
 
 # ─────────────────────────────────────────
-# BUILDER PRINCIPAL — chamado em main.py
+# BUILDER PRINCIPAL
 # ─────────────────────────────────────────
 
 def build_mensagem_ataque(
@@ -380,73 +345,117 @@ def build_mensagem_ataque(
     ficha_atacante: FichaPersonagem,
     comentario_ia: str = "",
 ) -> tuple[str, AtaqueView]:
-    """
-    Retorna (texto, view) prontos para enviar como resposta de ataque.
-    O texto é narrativo e limpo; a view contém os 3 botões de detalhes.
-    """
     texto = _montar_texto_ataque(resultado, ficha_alvo, comentario_ia)
     view  = AtaqueView(resultado, ficha_alvo, ficha_atacante)
     return texto, view
 
 
 # ─────────────────────────────────────────
-# EMBEDS LEGADOS (usados em slash commands)
+# INTERFACE DE FICHA INTERATIVA
 # ─────────────────────────────────────────
 
-def embed_ficha(ficha: FichaPersonagem) -> discord.Embed:
-    """Ficha completa do personagem para /ficha_ver e /status."""
-    cor   = get_cor_elemento(ficha.elemento_main)
-    emoji = get_emoji_elemento(ficha.elemento_main)
-    plano_str = ficha.plano + (f" ({ficha.elemento_secundario})" if ficha.elemento_secundario else "")
+class FichaView(discord.ui.View):
+    def __init__(self, ficha: FichaPersonagem, dono: discord.Member | discord.User | None = None):
+        super().__init__(timeout=120)
+        self.ficha = ficha
+        self.dono = dono
 
-    embed = discord.Embed(
-        title=f"{emoji} {ficha.nome}",
-        description=f"**Plano:** {plano_str}  |  **Zona:** {ficha.zona}  |  **Rebirths:** {ficha.rebirths}",
-        color=cor,
-    )
+    def _base_embed(self) -> discord.Embed:
+        cor = get_cor_elemento(self.ficha.elemento_main)
+        emoji = get_emoji_elemento(self.ficha.elemento_main)
+        embed = discord.Embed(title=f"{emoji} {self.ficha.nome}", color=cor)
+        
+        if self.dono:
+            embed.set_author(name=f"Jogador: {self.dono.display_name}", icon_url=self.dono.display_avatar.url)
+        
+        embed.set_footer(text=FOOTER_PADRAO)
+        return embed
 
-    embed.add_field(
-        name="❤️ HP",
-        value=barra_hp(ficha.hp_atual, ficha.hp_max, tamanho=12),
-        inline=False,
-    )
+    @discord.ui.button(label="📄 Info Básica", style=discord.ButtonStyle.primary, custom_id="btn_geral")
+    async def btn_geral(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = self._base_embed()
+        embed.description = "**Informações Gerais do Personagem**"
+        
+        plano_str = self.ficha.plano
+        if self.ficha.elemento_secundario:
+            plano_str += f" ({self.ficha.elemento_secundario})"
+            
+        embed.add_field(name="🌍 Plano de Existência", value=f"`{plano_str}`", inline=True)
+        embed.add_field(name="🌀 Zona de Poder", value=f"`Zona {self.ficha.zona}`", inline=True)
+        embed.add_field(name="🔄 Rebirths", value=f"`{self.ficha.rebirths}`", inline=True)
+        embed.add_field(name="🎮 Tupper Registrado", value=f"`{self.ficha.tupper_name}`", inline=False)
+        
+        await interaction.response.edit_message(embed=embed, view=self)
 
-    if not ficha.is_secundario:
+    @discord.ui.button(label="❤️ Status e Vida", style=discord.ButtonStyle.success, custom_id="btn_status")
+    async def btn_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = self._base_embed()
+        embed.description = "**Condição Atual de Combate**"
+        
         embed.add_field(
-            name="✨ Gnose",
-            value=barra_gnose(ficha.gnose_atual, ficha.gnose_max),
-            inline=False,
+            name="❤️ Pontos de Vida (HP)", 
+            value=barra_hp(self.ficha.hp_atual, self.ficha.hp_max, tamanho=12), 
+            inline=False
         )
+        
+        if not self.ficha.is_secundario:
+            embed.add_field(
+                name="✨ Energia (Gnose)", 
+                value=barra_gnose(self.ficha.gnose_atual, self.ficha.gnose_max, tamanho=12), 
+                inline=False
+            )
+            embed.add_field(
+                name="⭐ Pontos de Perícia (SP)", 
+                value=barra_sp(getattr(self.ficha, 'sp_atual', 0), getattr(self.ficha, 'sp_max', 10)), 
+                inline=False
+            )
+            
+        embed.add_field(name="🩻 Status Ativos", value=formatar_debuffs_embed(self.ficha), inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
 
-    embed.add_field(
-        name="🗡️ Ofensiva",
-        value=f"**STR** `{ficha.STR}`\n**RES** `{ficha.RES}`\n**AGI** `{ficha.AGI}`",
-        inline=True,
-    )
-    embed.add_field(
-        name="🛡️ Defensiva",
-        value=f"**SEN** `{ficha.SEN}`\n**VIT** `{ficha.VIT}`\n**INT** `{ficha.INT}`",
-        inline=True,
-    )
-    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    @discord.ui.button(label="📊 Atributos", style=discord.ButtonStyle.secondary, custom_id="btn_atributos")
+    async def btn_atributos(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = self._base_embed()
+        embed.description = "**Estatísticas e Capacidades**"
+        
+        embed.add_field(
+            name="🗡️ Ofensiva",
+            value=f"**STR** `{self.ficha.STR}`\n**RES** `{self.ficha.RES}`\n**AGI** `{self.ficha.AGI}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="🛡️ Defensiva",
+            value=f"**SEN** `{self.ficha.SEN}`\n**VIT** `{self.ficha.VIT}`\n**INT** `{self.ficha.INT}`",
+            inline=True,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
 
-    embed.add_field(
-        name="🩻 Status Ativos",
-        value=formatar_debuffs_embed(ficha),
-        inline=True,
-    )
-    embed.add_field(
-        name="🎮 Tupper",
-        value=f"`{ficha.tupper_name}`",
-        inline=True,
-    )
 
+def build_mensagem_ficha(ficha: FichaPersonagem, dono: discord.Member | discord.User | None = None) -> tuple[discord.Embed, discord.ui.View]:
+    """Constrói a mensagem inicial da ficha (Aba de Info Básica)."""
+    view = FichaView(ficha, dono)
+    
+    cor = get_cor_elemento(ficha.elemento_main)
+    emoji = get_emoji_elemento(ficha.elemento_main)
+    embed = discord.Embed(title=f"{emoji} {ficha.nome}", description="**Informações Gerais do Personagem**", color=cor)
+    
+    if dono:
+        embed.set_author(name=f"Jogador: {dono.display_name}", icon_url=dono.display_avatar.url)
+        
+    plano_str = ficha.plano
+    if ficha.elemento_secundario:
+        plano_str += f" ({ficha.elemento_secundario})"
+        
+    embed.add_field(name="🌍 Plano de Existência", value=f"`{plano_str}`", inline=True)
+    embed.add_field(name="🌀 Zona de Poder", value=f"`Zona {ficha.zona}`", inline=True)
+    embed.add_field(name="🔄 Rebirths", value=f"`{ficha.rebirths}`", inline=True)
+    embed.add_field(name="🎮 Tupper Registrado", value=f"`{ficha.tupper_name}`", inline=False)
+    
     embed.set_footer(text=FOOTER_PADRAO)
-    return embed
-
+    return embed, view
 
 # ─────────────────────────────────────────
-# PAINEL DE RAID (mantido para uso futuro)
+# PAINEL DE RAID E ULTIMATES
 # ─────────────────────────────────────────
 
 def embed_raid_painel(
@@ -496,3 +505,29 @@ def embed_raid_painel(
 
     embed.set_footer(text=f"{FOOTER_PADRAO} • Raid")
     return embed
+
+class UltimateModal(discord.ui.Modal, title='Preparar Ultimate'):
+    gnose_input = discord.ui.TextInput(label='Gnose a Gastar (0-100)', style=discord.TextStyle.short)
+    sp_input = discord.ui.TextInput(label='Perícia a Gastar (0-10)', style=discord.TextStyle.short)
+    acao_input = discord.ui.TextInput(label='Descrição da Ação', style=discord.TextStyle.paragraph)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message("Ultimate processada!", ephemeral=True)
+
+class RaidPainelView(discord.ui.View):
+    def __init__(self, turno_atual: int):
+        super().__init__(timeout=None)
+        self.turno_atual = turno_atual
+
+    @discord.ui.button(label="Avançar Turno", style=discord.ButtonStyle.primary, custom_id="btn_avancar")
+    async def btn_avancar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.turno_atual += 1
+        await interaction.response.send_message(f"O Turno avançou para {self.turno_atual}.", ephemeral=False)
+
+    @discord.ui.button(label="Descansar", style=discord.ButtonStyle.secondary, custom_id="btn_descansar")
+    async def btn_descansar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Você adotou postura defensiva para o próximo turno.", ephemeral=True)
+
+    @discord.ui.button(label="⚠️ Desferir Ultimate", style=discord.ButtonStyle.danger, custom_id="btn_ult")
+    async def btn_ult(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(UltimateModal())

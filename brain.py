@@ -9,6 +9,7 @@ import os
 import re
 import json
 import aiohttp
+import asyncio
 
 # ─────────────────────────────────────────
 # CONFIGURAÇÃO DE MODELOS E CHAVES
@@ -29,25 +30,22 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
 # ─────────────────────────────────────────
 
 SYSTEM_MESTRE = """
-Você é o Mestre de um RPG de combate estilo Honkai Star Rail / anime shonen.
-Sua função: analisar ações de combate e retornar SOMENTE JSON.
+Você é o Mestre de um RPG de combate estilo anime shonen.
+Sua função: ler a ação do jogador, interpretar a intenção semântica e retornar SOMENTE JSON.
 
-Regras de VA (Vantagem de Ação) — valor de 0 a 10:
-- 0-2: ação vaga, sem criatividade, sem lógica narrativa
-- 3-5: ação razoável, usa o elemento/contexto de forma básica
-- 6-8: ação criativa, aproveita bem o elemento e a situação
-- 9-10: ação excepcional, cinematográfica, usa fraquezas/buffs do ambiente
+Regras de Interpretação:
+1. "tipo": Defina como "ataque" se a ação for ofensiva, agressiva ou tentar aplicar efeito em alguém. Defina como "defesa" se for esquiva, bloqueio, recuo ou proteção.
+2. "alvo": Identifique e extraia o nome de quem está recebendo o ataque. Se for uma ação de defesa ou não houver alvo claro, retorne null.
+3. "va" (Vantagem de Ação 0-10): Avalie a criatividade. 0-2 (vaga/preguiçosa), 3-5 (básica), 6-8 (criativa/uso do ambiente), 9-10 (cinematográfica/épica).
 
-Retorne EXCLUSIVAMENTE o JSON abaixo (sem markdown, sem texto extra):
+Retorne EXCLUSIVAMENTE este formato JSON exato (sem markdown em volta):
 {
-    "va": <int 0-10>,
-    "comentario": "<string curta e épica de 1 linha sobre a ação>",
-    "valida": <true|false>,
-    "motivo_invalido": "<string ou null>"
+    "tipo": "ataque",
+    "alvo": "NomeDoAlvo",
+    "categoria_acao": "basico", 
+    "va": 8,
+    "comentario": "..."
 }
-
-Se a ação for fisicamente impossível para o nível de poder/zona do personagem,
-defina "valida": false e explique em "motivo_invalido".
 """.strip()
 
 
@@ -56,29 +54,33 @@ async def avaliar_acao(
     acao: str,
     elemento: str,
     zona: int,
-    alvo: str,
 ) -> dict:
     """
-    Envia a ação para a IA e retorna o dict com VA, comentário e validade.
-    Tenta Anthropic primeiro, depois Gemini, depois OpenAI, e fallback estático.
+    Delega à IA a responsabilidade de descobrir o tipo de ação e o alvo,
+    além de calcular a VA.
     """
     prompt = (
-        f"Personagem: {nome_personagem} (Elemento: {elemento}, Zona {zona})\n"
-        f"Alvo: {alvo}\n"
-        f"Ação declarada: {acao}"
+        f"Personagem Agindo: {nome_personagem} (Elemento: {elemento}, Zona {zona})\n"
+        f"Texto da Ação Declarada: {acao}"
     )
 
-    if ANTHROPIC_API_KEY:
-        resultado = await _chamar_anthropic(prompt)
-        if resultado: return resultado
+    tasks = []
+    if ANTHROPIC_API_KEY: tasks.append(asyncio.create_task(_chamar_anthropic(prompt)))
+    if GEMINI_API_KEY:    tasks.append(asyncio.create_task(_chamar_gemini(prompt)))
+    if OPENAI_API_KEY:    tasks.append(asyncio.create_task(_chamar_openai(prompt)))
 
-    if GEMINI_API_KEY:
-        resultado = await _chamar_gemini(prompt)
-        if resultado: return resultado
+    if not tasks:
+        return _fallback_estatico(acao)
 
-    if OPENAI_API_KEY:
-        resultado = await _chamar_openai(prompt)
-        if resultado: return resultado
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+    for p in pending:
+        p.cancel()
+
+    for task in done:
+        resultado = task.result()
+        if resultado:
+            return resultado
 
     return _fallback_estatico(acao)
 
@@ -90,6 +92,7 @@ async def gerar_resposta_boss(
 ) -> str:
     """
     Gera uma fala épica do boss baseada em sua personalidade e situação.
+    Dispara requisições simultâneas e retorna a primeira que responder.
     """
     urgencia = "furioso e desesperado" if hp_percentual < 0.30 else "confiante e ameaçador"
     prompt = (
@@ -104,17 +107,23 @@ async def gerar_resposta_boss(
         "sem aspas, sem prefixo, sem explicação. 1-2 frases máximo."
     )
 
-    if ANTHROPIC_API_KEY:
-        resultado = await _chamar_anthropic_texto(prompt, system)
-        if resultado: return resultado
+    tasks = []
+    if ANTHROPIC_API_KEY: tasks.append(asyncio.create_task(_chamar_anthropic_texto(prompt, system)))
+    if GEMINI_API_KEY:    tasks.append(asyncio.create_task(_chamar_gemini_texto(prompt, system)))
+    if OPENAI_API_KEY:    tasks.append(asyncio.create_task(_chamar_openai_texto(prompt, system)))
 
-    if GEMINI_API_KEY:
-        resultado = await _chamar_gemini_texto(prompt, system)
-        if resultado: return resultado
+    if not tasks:
+        return "Vocês não podem me derrotar..."
 
-    if OPENAI_API_KEY:
-        resultado = await _chamar_openai_texto(prompt, system)
-        if resultado: return resultado
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+    for p in pending:
+        p.cancel()
+
+    for task in done:
+        resultado = task.result()
+        if resultado:
+            return resultado
 
     return "Vocês não podem me derrotar..."
 
@@ -302,10 +311,12 @@ def _parse_json_seguro(texto: str) -> dict | None:
         return None
 
 def _fallback_estatico(acao: str) -> dict:
-    """Retorna um resultado genérico se todas as IAs falharem."""
+    """Retorna um resultado genérico se todas as IAs falharem ou estiverem offline."""
     return {
+        "tipo": "ataque",
+        "alvo": None,
         "va": 5,
-        "comentario": "Ação razoável, mas sem brilho.",
+        "comentario": "Ação computada pelos sistemas de contingência.",
         "valida": True,
         "motivo_invalido": None
     }

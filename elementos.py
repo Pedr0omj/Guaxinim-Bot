@@ -55,7 +55,7 @@ PLANO_PARANORMAL: dict[str, dict] = {
     "Sagrado":        {"base": "Vento",      "bonus_amp": 0.20, "emoji": "✨"},
     "Abismo":         {"base": "Gelo",       "bonus_amp": 0.20, "emoji": "🕳️"},
     "Tempestade":     {"base": "Raio",       "bonus_amp": 0.20, "emoji": "🌩️"},
-    "Armas":          {"base": "Fisico",     "bonus_amp": 0.20, "emoji": "🗡️"},
+    "Medo":          {"base": "Fisico",     "bonus_amp": 0.20, "emoji": "😱"},
     "Reliquias":      {"base": "Imaginario", "bonus_amp": 0.20, "emoji": "🏺"},
     "Maldição":       {"base": "Quantum",    "bonus_amp": 0.20, "emoji": "🔱"},
 }

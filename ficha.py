@@ -1,9 +1,6 @@
 """
 ficha.py — Guaxinim Bot
 Modelo de ficha de personagem, parsing e persistência em JSON.
-
-CORREÇÃO: asyncio.Lock() em salvar_ficha() para evitar race condition
-em combates simultâneos com múltiplos jogadores.
 """
 
 from __future__ import annotations
@@ -13,12 +10,11 @@ import asyncio
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-from config import STATS_VALIDOS, GNOSE_MAX_PADRAO
+from config import STATS_VALIDOS
 from elementos import normalizar_elemento
 
 FICHAS_PATH = "fichas.json"
 
-# Lock global — impede que duas corrotinas escrevam simultaneamente
 _ficha_lock = asyncio.Lock()
 
 
@@ -47,17 +43,31 @@ class FichaPersonagem:
     hp_max: int = field(init=False)
     hp_atual: int = field(init=False)
 
-    gnose_max: int = GNOSE_MAX_PADRAO
+    # Gnose baseada em 100 e atributos de Perícia (SP)
+    gnose_max: int = 100
     gnose_atual: int = field(init=False)
+
+    sp_max: int = 10
+    sp_atual: int = field(init=False)
+    is_resting: bool = False
 
     zona: int = 1
     debuffs: list[dict] = field(default_factory=list)
     is_secundario: bool = False
 
     def __post_init__(self):
-        self.hp_max     = self._calcular_hp_max()
-        self.hp_atual   = self.hp_max
+        self.hp_max      = self._calcular_hp_max()
+        self.hp_atual    = self.hp_max
         self.gnose_atual = self.gnose_max if not self.is_secundario else 0
+        self.sp_atual    = self.sp_max
+
+    def ativar_descanso(self):
+        self.is_resting = True
+
+    def processar_virada_turno(self):
+        regen = 25 if self.is_resting else 10
+        self.gnose_atual = min(self.gnose_max, self.gnose_atual + regen)
+        self.is_resting = False
 
     # ── HP ──────────────────────────────
     def _calcular_hp_max(self) -> int:
@@ -133,19 +143,30 @@ class FichaPersonagem:
     def from_dict(cls, data: dict) -> "FichaPersonagem":
         hp_atual     = data.pop("hp_atual", None)
         gnose_atual  = data.pop("gnose_atual", None)
+        sp_atual     = data.pop("sp_atual", None)
+        is_resting   = data.pop("is_resting", False)
         data.pop("hp_max", None)
+        
+        # Filtra chaves válidas para evitar crash com fichas antigas
+        valid_keys = {"nome", "dono_id", "tupper_name", "plano", "elemento_main", 
+                      "elemento_secundario", "STR", "RES", "AGI", "SEN", "VIT", "INT", 
+                      "rebirths", "gnose_max", "sp_max", "zona", "debuffs", "is_secundario"}
+        filtered_data = {k: v for k, v in data.items() if k in valid_keys}
 
-        obj = cls(**data)
+        obj = cls(**filtered_data)
         if hp_atual is not None:
             obj.hp_atual = hp_atual
         if gnose_atual is not None:
             obj.gnose_atual = gnose_atual
+        if sp_atual is not None:
+            obj.sp_atual = sp_atual
+        obj.is_resting = is_resting
         return obj
 
     def __repr__(self):
         return (
             f"<Ficha {self.nome} | {self.elemento_main} | "
-            f"HP {self.hp_atual}/{self.hp_max} | Gnose {self.gnose_atual}/{self.gnose_max}>"
+            f"HP {self.hp_atual}/{self.hp_max} | Gnose {self.gnose_atual}/{self.gnose_max} | SP {self.sp_atual}/{self.sp_max}>"
         )
 
 
@@ -166,26 +187,16 @@ def _salvar_todas(dados: dict[str, dict]):
 
 
 def salvar_ficha(ficha: FichaPersonagem):
-    """
-    Persiste a ficha no JSON.
-    CORREÇÃO: usa asyncio.Lock() para serializar escritas concorrentes.
-    Como esta função é chamada em contexto síncrono dentro de async handlers,
-    a lock é adquirida de forma segura.
-    """
-    # Tenta adquirir o lock se há um event loop rodando
     try:
         loop = asyncio.get_running_loop()
-        # Agenda a escrita segura — não bloqueia o event loop
         loop.create_task(_salvar_ficha_async(ficha))
     except RuntimeError:
-        # Sem event loop (testes, CLI) — escrita direta
         dados = _carregar_todas()
         dados[ficha.nome.lower()] = ficha.to_dict()
         _salvar_todas(dados)
 
 
 async def _salvar_ficha_async(ficha: FichaPersonagem):
-    """Versão async de salvar_ficha com lock para concorrência segura."""
     async with _ficha_lock:
         dados = _carregar_todas()
         dados[ficha.nome.lower()] = ficha.to_dict()
@@ -285,7 +296,7 @@ def criar_ficha_interativa(
         elemento_secundario=elem_sec,
         STR=str_, RES=res, AGI=agi, SEN=sen, VIT=vit, INT=int_,
         rebirths=rebirths,
-        gnose_max=gnose_max,
+        gnose_max=100, # Modificado para forçar 100 de Gnose base
         zona=zona,
         is_secundario=is_sec,
     )

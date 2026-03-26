@@ -81,18 +81,18 @@ GNOSE_MAX_PADRAO = 9  # pode ser sobrescrito na ficha
 # ─────────────────────────────────────────
 # MECÂNICAS DE COMBATE
 # ─────────────────────────────────────────
+
 BASE_DANO       = 50   # base fixa antes dos multiplicadores
-MULT_ATK        = 0.6  # multiplicador do log(STR)
-MULT_VA         = 0.6  # multiplicador da Vantagem de Ação (VA)
-MULT_ELEM       = 0.25 # multiplicador do bônus elemental
-CRIT_CHANCE     = 15   # % base de crítico
-CRIT_BONUS_MULT = 1.5  # multiplicador de dano no crítico
+MULT_ATK        = 2.0  # (ALTERADO) Multiplicador direto de Força
+MULT_VA         = 1.0  # (ALTERADO) Valoriza mais a nota de criatividade da IA
+MULT_ELEM       = 0.25 
+CRIT_CHANCE     = 15   
+CRIT_BONUS_MULT = 1.5  
 
-# DEF mitiga: DEF = RES + 5 (secundários não têm RES, usam 0)
-# VIT mitiga: VIT = camada secundária
-DEF_FORMULA     = lambda res: res + 5
-VIT_FORMULA     = lambda vit: vit
-
+# (ALTERADO) DEF mitiga: 1.2x da RES. 
+# (ALTERADO) VIT mitiga: Apenas metade da VIT vira armadura pura.
+DEF_FORMULA     = lambda res: int(res * 1.2)
+VIT_FORMULA     = lambda vit: int(vit * 0.5)
 # Fórmula de dano principal (sem crítico, sem elemento):
 # dano = (BASE + MULT_ATK * log(STR) + MULT_VA * VA) * MULT_ELEM_camadas * Zona - DEF - VIT
 # A engine.py implementa isso com RNG e camadas completas.
