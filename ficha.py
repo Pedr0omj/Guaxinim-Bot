@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-from config import VALID_STATS
+from config import VALID_STATS, GNOSE_MAX_CAP
 from elementos import normalizar_elemento
 
 FICHAS_PATH = "fichas.json"
@@ -56,6 +56,10 @@ class FichaPersonagem:
     is_secundario: bool = False
 
     def __post_init__(self):
+        # ADICIONADO: Eu aplico limites defensivos para manter a ficha consistente
+        # mesmo quando dados antigos/externos vêm com valores fora do esperado.
+        self.gnose_max = max(1, min(int(self.gnose_max), GNOSE_MAX_CAP))
+        self.sp_max = max(0, int(self.sp_max))
         self.hp_max      = self._calcular_hp_max()
         self.hp_atual    = self.hp_max
         self.gnose_atual = self.gnose_max if not self.is_secundario else 0
@@ -110,7 +114,8 @@ class FichaPersonagem:
             return True
         if self.gnose_atual < custo:
             return False
-        self.gnose_atual -= custo
+        # CORRIGIDO: Eu garanto clamp para nunca cair abaixo de zero mesmo em edge cases.
+        self.gnose_atual = max(0, self.gnose_atual - custo)
         return True
 
     @property
@@ -160,11 +165,12 @@ class FichaPersonagem:
 
         obj = cls(**filtered_data)
         if hp_atual is not None:
-            obj.hp_atual = hp_atual
+            # CORRIGIDO: Eu faço clamp para evitar HP inválido acima do máximo ao carregar.
+            obj.hp_atual = max(0, min(int(hp_atual), obj.hp_max))
         if gnose_atual is not None:
-            obj.gnose_atual = gnose_atual
+            obj.gnose_atual = max(0, min(int(gnose_atual), obj.gnose_max))
         if sp_atual is not None:
-            obj.sp_atual = sp_atual
+            obj.sp_atual = max(0, min(int(sp_atual), obj.sp_max))
         obj.is_resting = is_resting
         return obj
 
@@ -253,6 +259,12 @@ def carregar_ficha_por_dono(dono_id: int) -> list[FichaPersonagem]:
     ]
 
 
+def carregar_todas_fichas() -> list[FichaPersonagem]:
+    """Retorna todas as fichas persistidas no JSON."""
+    dados = _carregar_todas()
+    return [FichaPersonagem.from_dict(raw) for raw in dados.values()]
+
+
 def deletar_ficha(nome: str) -> bool:
     dados = _carregar_todas()
     key = nome.lower()
@@ -311,6 +323,10 @@ def criar_ficha_interativa(
 
     if zona not in (1, 2, 3, 4):
         raise FichaParseError("Zona deve ser 1, 2, 3 ou 4.")
+
+    # ADICIONADO: Eu validei Gnose Máxima no cadastro para impedir valores quebrados.
+    if gnose_max < 1 or gnose_max > GNOSE_MAX_CAP:
+        raise FichaParseError(f"Gnose Máx deve ser entre 1 e {GNOSE_MAX_CAP}.")
 
     return FichaPersonagem(
         nome=nome,

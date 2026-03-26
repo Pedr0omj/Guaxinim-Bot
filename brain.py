@@ -42,6 +42,7 @@ Regras de Interpretação:
 1. "tipo": Defina como "ataque" se a ação for ofensiva, agressiva ou tentar aplicar efeito em alguém. Defina como "defesa" se for esquiva, bloqueio, recuo ou proteção.
 2. "alvo": Identifique e extraia o nome de quem está recebendo o ataque. Se for uma ação de defesa ou não houver alvo claro, retorne null.
 3. "va" (Vantagem de Ação 0-10): Avalie a criatividade. 0-2 (vaga/preguiçosa), 3-5 (básica), 6-8 (criativa/uso do ambiente), 9-10 (cinematográfica/épica).
+4. "categoria_acao": use "pericia" quando a ação explicitamente representar técnica/habilidade/magia/jutsu/golpe especial/ritual/feitiço; use "basico" para ataque comum.
 
 Retorne EXCLUSIVAMENTE este formato JSON exato (sem markdown em volta):
 {
@@ -348,6 +349,17 @@ def _extrair_alvo_basico(acao: str) -> str | None:
     match = padrao.search(acao)
     return match.group(1) if match else None
 
+
+def _inferir_categoria_acao(acao: str) -> str:
+    """Inferência simples de categoria para fallback sem IA externa."""
+    acao_lower = acao.lower()
+    # ADICIONADO: Eu marquei perícia por palavras-chave explícitas de habilidade especial.
+    palavras_pericia = (
+        "tecnica", "técnica", "habilidade", "magia", "jutsu", "ritual",
+        "feitiço", "feitico", "ultimate", "especial", "skill"
+    )
+    return "pericia" if any(p in acao_lower for p in palavras_pericia) else "basico"
+
 def _fallback_estatico(acao: str) -> dict:
     """Retorna um resultado genérico se todas as IAs falharem ou estiverem offline.
     
@@ -360,13 +372,14 @@ def _fallback_estatico(acao: str) -> dict:
     # ações válidas quando os provedores de IA estiverem indisponíveis.
     acao_lower = acao.lower().strip()
     alvo_extraido = _extrair_alvo_basico(acao)
+    categoria = _inferir_categoria_acao(acao)
 
     # Mantive rejeição apenas para mensagens quase vazias/spam.
     if len(acao_lower) < 3:
         return {
             "tipo": "ataque",
             "alvo": alvo_extraido,
-            "categoria_acao": "basico",
+            "categoria_acao": categoria,
             "va": 3,
             "comentario": "A ação foi rejeitada: muito vaga ou incompleta.",
             "valida": False,
@@ -377,7 +390,7 @@ def _fallback_estatico(acao: str) -> dict:
     return {
         "tipo": "ataque",
         "alvo": alvo_extraido,
-        "categoria_acao": "basico",
+        "categoria_acao": categoria,
         "va": 5,
         "comentario": "Ação computada pelos sistemas de contingência.",
         "valida": True,

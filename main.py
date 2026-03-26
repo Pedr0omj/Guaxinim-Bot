@@ -21,12 +21,14 @@ from config import GUILD_ID, ZONES
 from ficha import (
     FichaPersonagem, carregar_ficha_por_tupper, carregar_ficha_por_nome,
     salvar_ficha_async, deletar_ficha, criar_ficha_interativa, FichaParseError,
+    carregar_todas_fichas,
     carregar_ficha_por_dono,
 )
 from engine import CombatEngine
 from brain import avaliar_acao
 from ui_mvp import build_mensagem_ataque, build_mensagem_ficha, AtaqueView, RaidPainelView
 from debuff import (
+    processar_tick_debuffs,
     verificar_atordoamento,
 )
 from elementos import normalizar_elemento
@@ -147,6 +149,11 @@ async def on_ready():
     await bot.tree.sync(guild=None)
     
     await bot.tree.sync(guild=guild_obj)
+
+    # ADICIONADO: Eu deixei um alerta explícito para arquivo legado (.db)
+    # já que o sistema atual persiste fichas em JSON.
+    if os.path.exists("fichas.db"):
+        log.warning("Arquivo legado detectado: fichas.db. O sistema atual usa fichas.json.")
     
     log.info("Online como %s | Comandos sincronizados e limpos.", bot.user)
 
@@ -285,21 +292,31 @@ async def _processar_ataque(
                         zona_raid=zona_raid,
                     )
 
-                    dano_real = ficha_alvo.receber_dano(resultado.dano_final)
-                    resultado.dano_real = dano_real
-                    resultado.hp_restante_alvo = ficha_alvo.hp_atual
-
+                    # CORRIGIDO: Eu aplico DefesaAtiva ANTES de tocar no HP para evitar
+                    # restauração posterior (gambiarra) e manter o fluxo de dano limpo.
+                    dano_para_aplicar = resultado.dano_final
+                    defesa_ativa_mult = 1.0
                     defesa_ativa = ficha_alvo.tem_debuff("DefesaAtiva")
                     if defesa_ativa:
-                        dano_reduzido = int(dano_real * 0.5)
-                        diferenca = dano_real - dano_reduzido
-                        ficha_alvo.hp_atual = min(ficha_alvo.hp_max, ficha_alvo.hp_atual + diferenca)
-                        resultado.dano_real = dano_reduzido
+                        dano_para_aplicar = int(dano_para_aplicar * 0.5)
+                        defesa_ativa_mult = 0.5
                         ficha_alvo.debuffs = [d for d in ficha_alvo.debuffs if d["nome"] != "DefesaAtiva"]
                         log.debug(
                             f"{ficha_alvo.nome} - DefesaAtiva ativada: "
-                            f"dano reduzido de {dano_real} para {dano_reduzido}"
+                            f"dano reduzido de {resultado.dano_final} para {dano_para_aplicar}"
                         )
+
+                    hp_antes_alvo = ficha_alvo.hp_atual
+                    dano_real = ficha_alvo.receber_dano(dano_para_aplicar)
+                    resultado.dano_real = dano_real
+                    resultado.hp_restante_alvo = ficha_alvo.hp_atual
+
+                    # ADICIONADO: Eu sincronizei o breakdown com os modificadores finais
+                    # aplicados em main.py para a matemática visual bater com o dano real.
+                    resultado.breakdown["defesa_ativa_mult"] = defesa_ativa_mult
+                    resultado.breakdown["dano_pre_hp_clamp"] = int(dano_para_aplicar)
+                    resultado.breakdown["hp_antes_alvo"] = int(hp_antes_alvo)
+                    resultado.breakdown["clamp_hp_perda"] = max(0, int(dano_para_aplicar - dano_real))
 
                     # MELHORADO: Eu troquei salvamento síncrono por assíncrono no caminho quente de combate.
                     await salvar_ficha_async(ficha_atacante_atual)
@@ -436,6 +453,41 @@ async def descansar(interaction: discord.Interaction, personagem: str):
     await interaction.response.send_message(
         f"✨ **{ficha.nome}** descansou e recuperou **{recuperado}** de Gnose.\n"
         f"Gnose atual: `{ficha.gnose_atual}/{ficha.gnose_max}`"
+    )
+
+
+@bot.tree.command(guild=guild_obj, name="turno_avancar", description="[Admin] Avança 1 turno global, processando regen e debuffs.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def turno_avancar(interaction: discord.Interaction):
+    fichas_snapshot = carregar_todas_fichas()
+    if not fichas_snapshot:
+        await interaction.response.send_message("⚠️ Não há fichas para processar.", ephemeral=True)
+        return
+
+    # ADICIONADO: Eu conectei a virada de turno real do sistema.
+    # Agora processa regen de gnose e expiração/dano de debuffs em lote.
+    locks = await _adquirir_locks_personagens(*(f.nome for f in fichas_snapshot))
+    try:
+        total = 0
+        afetados = 0
+        for f in fichas_snapshot:
+            ficha_atual = carregar_ficha_por_nome(f.nome)
+            if ficha_atual is None:
+                continue
+
+            ficha_atual.processar_virada_turno()
+            mensagens = processar_tick_debuffs(ficha_atual, persistir=False)
+            if mensagens:
+                afetados += 1
+
+            await salvar_ficha_async(ficha_atual)
+            total += 1
+    finally:
+        _liberar_locks_personagens(locks)
+
+    await interaction.response.send_message(
+        f"⏭️ Turno avançado para **{total}** ficha(s). "
+        f"Debuffs processados em **{afetados}** personagem(ns)."
     )
 
 @bot.tree.command(guild=guild_obj, name="guaxinim_chat", description="Conversa diretamente com o Mestre IA.")

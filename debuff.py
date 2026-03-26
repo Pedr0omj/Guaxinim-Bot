@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # EFEITOS POR TURNO (tick)
 # ─────────────────────────────────────────
 
-def processar_tick_debuffs(personagem: FichaPersonagem) -> list[str]:
+def processar_tick_debuffs(personagem: FichaPersonagem, persistir: bool = True) -> list[str]:
     """
     Processa debuffs no início/fim de turno.
     Aplica DoT (Queimadura, Sangramento) e remove os expirados.
@@ -49,7 +49,10 @@ def processar_tick_debuffs(personagem: FichaPersonagem) -> list[str]:
         logger.debug(f"{personagem.nome} - {nome_exp} expirou")
         mensagens.append(f"{emoji} **{nome_exp}** expirou.")
 
-    salvar_ficha(personagem)
+    # ADICIONADO: Eu permiti desligar persistência síncrona aqui para cenários assíncronos
+    # (ex.: virada de turno em lote), evitando I/O bloqueante no loop principal.
+    if persistir:
+        salvar_ficha(personagem)
     return mensagens
 
 

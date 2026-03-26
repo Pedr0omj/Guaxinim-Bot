@@ -217,6 +217,13 @@ def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
     bd = resultado.breakdown
     cor = CRITICAL_COLOR if resultado.e_critico else get_cor_elemento(resultado.elemento)
     dano_aplicado = resultado.dano_real if resultado.dano_real > 0 else resultado.dano_final
+    dano_pos_mitigacao = bd.get("dano_pos_mitigacao", max(1, resultado.dano_base - resultado.dano_bloqueado))
+    vuln_mult = bd.get("vuln_mult", 1.0)
+    dano_pos_vuln = bd.get("dano_pos_vulnerabilidade", resultado.dano_final)
+    defesa_ativa_mult = bd.get("defesa_ativa_mult", 1.0)
+    dano_pre_hp_clamp = bd.get("dano_pre_hp_clamp", dano_pos_vuln)
+    hp_antes_alvo = bd.get("hp_antes_alvo", "?")
+    clamp_hp_perda = bd.get("clamp_hp_perda", 0)
 
     embed = discord.Embed(
         title="🧮 Detalhes do Cálculo",
@@ -262,7 +269,7 @@ def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
         name="4️⃣ Defesas do Alvo",
         value=(
             f"```\n"
-            f"DEF (RES + 5)  = {bd['def_mitiga']:>6}  (mitiga dano físico)\n"
+            f"DEF (RES × 1.2)= {bd['def_mitiga']:>6}  (mitiga dano físico)\n"
             f"VIT            = {bd['vit_mitiga']:>6}  (camada de vitalidade)\n"
             f"Total mitigado = {bd['total_mitiga']:>6}\n"
             f"```"
@@ -271,11 +278,18 @@ def _embed_detalhes_calculo(resultado: ResultadoAtaque) -> discord.Embed:
     )
 
     embed.add_field(
-        name="✅ Dano Final",
+        name="✅ Dano Final (Conta Fechada)",
         value=(
             f"```\n"
             f"Dano bruto     = {resultado.dano_base:>6}\n"
             f"Mitigado       = {resultado.dano_bloqueado:>6}\n"
+            f"Pos-mitigação  = {dano_pos_mitigacao:>6}\n"
+            f"Vulnerabilidade= x{vuln_mult:<5}\n"
+            f"Pos-vuln       = {int(dano_pos_vuln):>6}\n"
+            f"Defesa Ativa   = x{defesa_ativa_mult:<5}\n"
+            f"Pré-clamp HP   = {int(dano_pre_hp_clamp):>6}\n"
+            f"HP antes alvo  = {hp_antes_alvo:>6}\n"
+            f"Perda por clamp= {int(clamp_hp_perda):>6}\n"
             f"──────────────────────\n"
             f"Dano aplicado  = {dano_aplicado:>6}\n"
             f"```"
@@ -428,12 +442,13 @@ class FichaView(discord.ui.View):
         
         embed.add_field(
             name="🗡️ Ofensiva",
-            value=f"**STR** `{self.ficha.STR}`\n**RES** `{self.ficha.RES}`\n**AGI** `{self.ficha.AGI}`",
+            # CORRIGIDO: Eu reorganizei os atributos para um agrupamento semântico mais coerente.
+            value=f"**STR** `{self.ficha.STR}`\n**AGI** `{self.ficha.AGI}`\n**SEN** `{self.ficha.SEN}`",
             inline=True,
         )
         embed.add_field(
             name="🛡️ Defensiva",
-            value=f"**SEN** `{self.ficha.SEN}`\n**VIT** `{self.ficha.VIT}`\n**INT** `{self.ficha.INT}`",
+            value=f"**RES** `{self.ficha.RES}`\n**VIT** `{self.ficha.VIT}`\n**INT** `{self.ficha.INT}`",
             inline=True,
         )
         await interaction.response.edit_message(embed=embed, view=self)

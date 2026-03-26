@@ -77,6 +77,12 @@ VALID_STATS = ["STR", "RES", "AGI", "SEN", "VIT", "INT"]
 
 # Gnose: pool de PA por combate
 DEFAULT_MAX_GNOSIS = 100  # pode ser sobrescrito na ficha
+# ADICIONADO: Eu defini um teto de segurança para evitar fichas com valores absurdos
+# de Gnose Máxima (ex.: 100000), o que quebraria o balanceamento do sistema.
+GNOSE_MAX_CAP = 10000
+# ADICIONADO: Eu defini um teto suave para o buff de ATK da Gnose em faixas altas,
+# para impedir crescimento descontrolado de dano quando status e Gnose estão muito altos.
+GNOSE_ATK_BUFF_SOFT_CAP = 1.50  # +150% no multiplicador de ATK por efeito de Gnose
 
 # ─────────────────────────────────────────
 # MECÂNICAS DE COMBATE

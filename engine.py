@@ -17,7 +17,7 @@ from config import (
     BASE_DAMAGE, ATK_MULTIPLIER, VA_MULTIPLIER, ELEMENT_MULTIPLIER,
     CRITICAL_CHANCE, CRITICAL_BONUS_MULTIPLIER,
     DEF_FORMULA, VIT_FORMULA,
-    ZONES,
+    ZONES, GNOSE_ATK_BUFF_SOFT_CAP,
 )
 from elementos import calcular_bonus_elemental, get_variante_paranormal
 from ficha import FichaPersonagem
@@ -194,6 +194,15 @@ class CombatEngine:
             "vit_mitiga":       int(vit_mitiga),
             "total_mitiga":     int(total_mitiga),
             "mult_elem":        round(mult_elem, 2),
+            # ADICIONADO: Eu passei a registrar todos os estágios finais para o embed
+            # conseguir reproduzir a conta exata até o dano aplicado real.
+            "dano_pos_mitigacao": int(dano_mitigado),
+            "vuln_mult":        round(1.0 + estado_alvo["vuln"], 4),
+            "dano_pos_vulnerabilidade": int(dano_final),
+            "defesa_ativa_mult": 1.0,
+            "dano_pre_hp_clamp": int(dano_final),
+            "hp_antes_alvo":    None,
+            "clamp_hp_perda":   0,
         }
 
         return ResultadoAtaque(
@@ -235,7 +244,10 @@ class CombatEngine:
         if gnose >= 80:
             degraus = (gnose - 80) // 5
             incremento_zona = 0.01 + (zona * 0.01)
-            estado["atk_buff"] = degraus * incremento_zona
+            atk_buff_raw = degraus * incremento_zona
+            # CORRIGIDO: Eu apliquei soft cap no buff de ATK da Gnose para conter picos
+            # desbalanceados com atributos muito altos.
+            estado["atk_buff"] = min(atk_buff_raw, GNOSE_ATK_BUFF_SOFT_CAP)
             estado["def_buff"] = 0.35 
 
         elif 50 <= gnose < 80:
